@@ -1,62 +1,32 @@
-# Multi-stage build untuk production-ready image
-FROM python:3.11-slim as builder
-
-WORKDIR /app
+FROM python:3.11-slim
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    libopencv-dev \
-    python3-opencv \
-    libsm6 \
-    libxext6 \
-    libxrender-dev \
-    && rm -rf /var/lib/apt/lists/*
-
-# Copy requirements dan install Python packages
-COPY requirements.txt .
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
-
-# ============================================================================
-# Production Image
-FROM python:3.11-slim
-
-WORKDIR /app
-
-# Install runtime dependencies only
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libopencv-dev \
-    libsm6 \
-    libxext6 \
-    libxrender-dev \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    ffmpeg \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy installed packages dari builder
-COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
-COPY --from=builder /usr/local/bin /usr/local/bin
+# Hugging Face Rule: Set up user
+RUN useradd -m -u 1000 user
+ENV HOME=/home/user \
+    PATH=/home/user/.local/bin:$PATH
 
-# Copy application files
-COPY main.py .
-COPY requirements.txt .
+WORKDIR $HOME/app
 
-# Create Dataset directory for model
-RUN mkdir -p /app/Dataset
+# Copy files and set permissions
+COPY --chown=user . $HOME/app/
 
-# Create non-root user untuk security
-RUN useradd -m -u 1000 appuser && \
-    mkdir -p /app/logs && \
-    chown -R appuser:appuser /app
+# Switch to non-root user
+USER user
 
-USER appuser
+# Install Python requirements
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
 
-# Health check
-HEALTHCHECK --interval=10s --timeout=5s --retries=3 \
-    CMD curl -f http://localhost:8000/api/health || exit 1
-
-# Expose port
-EXPOSE 8000
+# Expose port 7860
+EXPOSE 7860
 
 # Run application
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "7860"]

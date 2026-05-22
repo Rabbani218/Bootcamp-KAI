@@ -123,6 +123,9 @@ class AnomalyRecord(BaseModel):
     ai_report: Optional[str]
 
 
+class YoutubeResolveRequest(BaseModel):
+    youtube_url: str
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # SQLITE DATABASE
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -384,14 +387,13 @@ app = FastAPI(
     redoc_url="/api/redoc",
 )
 
+frontend_url = os.getenv("FRONTEND_URL")
+origins = [frontend_url] if frontend_url else ["*"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://localhost:3001",
-        "http://127.0.0.1:3000",
-    ],
-    allow_credentials=True,
+    allow_origins=origins,
+    allow_credentials=False if not frontend_url else True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -403,6 +405,18 @@ tracker:  Optional[TemporalAnomalyTracker] = None
 @app.on_event("startup")
 async def startup_event():
     global detector, tracker
+
+    # HF Spaces rule: Build DB spatial jika belum ada (ephemeral disk)
+    if not os.path.exists("local_railways.db"):
+        log.info("⚙️ local_railways.db tidak ditemukan. Membangun database spasial secara otomatis...")
+        try:
+            import build_geo_database
+            if hasattr(build_geo_database, "build_database"):
+                build_geo_database.build_database()
+            log.info("✅ Database spasial (local_railways.db) berhasil dibangun.")
+        except Exception as e:
+            log.error(f"❌ Gagal membangun database spasial: {e}")
+
     _init_db()
     try:
         detector = YOLODetector(MODEL_PATH)
@@ -681,6 +695,36 @@ async def reset_tracker():
         "message": "Tracker dan buffer direset",
         "timestamp": datetime.now().isoformat(),
     }
+
+
+@app.post("/api/v1/resolve-youtube")
+async def resolve_youtube(request: YoutubeResolveRequest):
+    import asyncio
+    try:
+        import yt_dlp
+    except ImportError:
+        raise HTTPException(500, "Library yt-dlp belum terinstall di backend.")
+    
+    ydl_opts = {
+        'format': 'best[ext=mp4]/best',
+        'quiet': True,
+        'no_warnings': True,
+        'skip_download': True
+    }
+    
+    def extract():
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(request.youtube_url, download=False)
+            return info.get('url', None)
+
+    try:
+        stream_url = await asyncio.to_thread(extract)
+        if not stream_url:
+            raise ValueError("Tidak dapat menemukan stream URL mentah.")
+        return {"stream_url": stream_url}
+    except Exception as e:
+        log.error(f"YouTube resolve error: {e}")
+        raise HTTPException(400, f"Gagal mengekstrak YouTube URL: {e}")
 
 
 @app.exception_handler(HTTPException)
