@@ -128,7 +128,7 @@ function DashboardInner() {
   }, [addLog, playBeep, fetchAiReport]);
 
   const handleError = useCallback((msg: string) => {
-    setCctvDown(true); addLog('error', `API Error: ${msg}`);
+    addLog('error', `Error: ${msg}`);
   }, [addLog]);
 
   const handleReset = useCallback(async () => {
