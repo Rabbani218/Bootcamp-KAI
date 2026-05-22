@@ -1,0 +1,138 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── Fonts ── */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+/* ── CSS Variables ── */
+:root {
+  --neon-cyan:  #00f5ff;
+  --neon-red:   #ff2d55;
+  --neon-green: #00ff88;
+  --neon-amber: #ffb800;
+  --glass-bg:   rgba(255, 255, 255, 0.04);
+  --glass-border: rgba(255, 255, 255, 0.08);
+  --dark-900:   #050d1a;
+  --dark-800:   #0a1628;
+  --dark-700:   #0f2040;
+}
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar       { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: var(--dark-800); }
+::-webkit-scrollbar-thumb { background: rgba(0,245,255,0.3); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(0,245,255,0.6); }
+
+/* ── Selection ── */
+::selection { background: rgba(0,245,255,0.2); color: #fff; }
+
+/* ── Base ── */
+html { color-scheme: dark; scroll-behavior: smooth; }
+body { font-family: 'Inter', sans-serif; background: var(--dark-900); }
+
+/* ── Glassmorphism Cards ── */
+@layer components {
+  .glass-panel {
+    @apply relative overflow-hidden rounded-2xl;
+    background: var(--glass-bg);
+    border: 1px solid var(--glass-border);
+    backdrop-filter: blur(20px) saturate(180%);
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+  }
+
+  .glass-panel-cyan {
+    @apply glass-panel;
+    border-color: rgba(0,245,255,0.2);
+    box-shadow: 0 0 20px rgba(0,245,255,0.05), inset 0 1px 0 rgba(0,245,255,0.1);
+  }
+
+  .glass-panel-red {
+    @apply glass-panel;
+    border-color: rgba(255,45,85,0.4);
+    box-shadow: 0 0 30px rgba(255,45,85,0.15), inset 0 1px 0 rgba(255,45,85,0.2);
+  }
+
+  .glass-panel-green {
+    @apply glass-panel;
+    border-color: rgba(0,255,136,0.25);
+    box-shadow: 0 0 20px rgba(0,255,136,0.08), inset 0 1px 0 rgba(0,255,136,0.1);
+  }
+
+  /* Neon text */
+  .text-neon-cyan  { color: var(--neon-cyan);  text-shadow: 0 0 20px rgba(0,245,255,0.6); }
+  .text-neon-red   { color: var(--neon-red);   text-shadow: 0 0 20px rgba(255,45,85,0.6); }
+  .text-neon-green { color: var(--neon-green); text-shadow: 0 0 20px rgba(0,255,136,0.6); }
+  .text-neon-amber { color: var(--neon-amber); text-shadow: 0 0 20px rgba(255,184,0,0.6); }
+
+  /* Neon border glow */
+  .border-neon-cyan  { border-color: var(--neon-cyan);  box-shadow: 0 0 12px rgba(0,245,255,0.4); }
+  .border-neon-red   { border-color: var(--neon-red);   box-shadow: 0 0 12px rgba(255,45,85,0.5); }
+  .border-neon-green { border-color: var(--neon-green); box-shadow: 0 0 12px rgba(0,255,136,0.4); }
+
+  /* Stat card */
+  .stat-card {
+    @apply glass-panel flex flex-col gap-1 p-4;
+    background: rgba(255,255,255,0.03);
+  }
+
+  /* Mono font */
+  .font-mono-jet { font-family: 'JetBrains Mono', monospace; }
+
+  /* Pulse dot */
+  .dot-pulse {
+    @apply rounded-full;
+    animation: dotPulse 1.8s ease-in-out infinite;
+  }
+}
+
+/* ── Keyframes ── */
+@keyframes dotPulse {
+  0%,100% { opacity: 1; transform: scale(1); }
+  50%      { opacity: .4; transform: scale(.75); }
+}
+
+@keyframes scanline {
+  0%   { transform: translateY(-100%); }
+  100% { transform: translateY(100vh); }
+}
+
+@keyframes alertFlash {
+  0%,100% { background: rgba(255,45,85,0.08); }
+  50%      { background: rgba(255,45,85,0.22); }
+}
+
+@keyframes fadeSlideIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes neonGlow {
+  0%,100% { box-shadow: 0 0 8px rgba(0,245,255,0.3); }
+  50%      { box-shadow: 0 0 24px rgba(0,245,255,0.7); }
+}
+
+/* Utility classes for animations */
+.animate-alert-flash  { animation: alertFlash 1.2s ease-in-out infinite; }
+.animate-fade-in      { animation: fadeSlideIn .25s ease-out; }
+.animate-neon-glow    { animation: neonGlow 2.5s ease-in-out infinite; }
+
+/* Scanline overlay on video */
+.scanline-overlay::after {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 3px;
+  background: linear-gradient(90deg, transparent, rgba(0,245,255,0.4), transparent);
+  animation: scanline 4s linear infinite;
+  pointer-events: none;
+  z-index: 10;
+}
+
+/* Grid background */
+.grid-bg {
+  background-image:
+    linear-gradient(rgba(0,245,255,0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0,245,255,0.03) 1px, transparent 1px);
+  background-size: 40px 40px;
+}

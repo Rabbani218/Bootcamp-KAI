@@ -1,0 +1,44 @@
+version: '3.8'
+
+services:
+  # FastAPI Backend Service
+  api_backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: traffic_anomaly_backend
+    ports:
+      - "8000:8000"
+    environment:
+      - API_HOST=0.0.0.0
+      - API_PORT=8000
+      - ENV=production
+      - LOG_LEVEL=INFO
+    volumes:
+      - ./Dataset:/app/Dataset:ro           # Read-only untuk model
+      - ./logs:/app/logs                    # Untuk logs persistence
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    networks:
+      - traffic_network
+    # GPU support (uncomment jika ada GPU)
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+networks:
+  traffic_network:
+    driver: bridge
+
+volumes:
+  logs:
+    driver: local

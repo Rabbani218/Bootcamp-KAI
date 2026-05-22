@@ -1,0 +1,9 @@
+names:
+- car
+- motorcycle
+- train
+nc: 3
+path: /content/dataset_master
+test: test/images
+train: train/images
+val: valid/images
