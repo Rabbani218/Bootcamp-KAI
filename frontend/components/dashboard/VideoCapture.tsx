@@ -1,10 +1,11 @@
 'use client';
 
 import React, { useRef, useEffect, useState, useCallback } from 'react';
-import { Upload, Square, Video, Wifi, WifiOff } from 'lucide-react';
+import { Upload, Square, Video, Wifi, WifiOff, Youtube, Loader2 } from 'lucide-react';
 import { useVideoCapture } from '@/hooks/useVideoCapture';
 import type { AnalyzeFrameResponse } from '@/lib/types';
 import { CLASS_COLORS } from '@/lib/constants';
+import { resolveYouTubeUrl } from '@/lib/api';
 
 interface VideoCaptureProps {
   onFrameAnalyzed?: (response: AnalyzeFrameResponse) => void;
@@ -83,6 +84,8 @@ export const VideoCapture: React.FC<VideoCaptureProps> = ({
   const containerRef  = useRef<HTMLDivElement>(null);
   const [lastAnalysis, setLastAnalysis] = useState<AnalyzeFrameResponse | null>(null);
   const [fps, setFps]   = useState(0);
+  const [ytUrl, setYtUrl] = useState('');
+  const [isResolving, setIsResolving] = useState(false);
   const fpsCountRef     = useRef(0);
 
   const handleAnalyzed = useCallback((response: AnalyzeFrameResponse) => {
@@ -91,7 +94,7 @@ export const VideoCapture: React.FC<VideoCaptureProps> = ({
     onFrameAnalyzed?.(response);
   }, [onFrameAnalyzed]);
 
-  const { videoRef, canvasRef, isCapturing, loadVideoFile, startCapture, stopCapture } =
+  const { videoRef, canvasRef, isCapturing, loadVideoFile, loadVideoUrl, startCapture, stopCapture } =
     useVideoCapture({
       onFrameAnalyzed: handleAnalyzed,
       onError: (e) => onError?.(e.message),
@@ -123,19 +126,53 @@ export const VideoCapture: React.FC<VideoCaptureProps> = ({
 
   return (
     <div className="flex flex-col gap-4">
-      {/* Upload button */}
-      <div>
-        <input ref={fileInputRef} type="file" accept="video/*" onChange={handleFile} className="hidden" id="video-file-input" />
-        <button
-          id="upload-video-btn"
-          onClick={() => fileInputRef.current?.click()}
-          className="w-full py-3 px-4 rounded-xl flex items-center justify-center gap-3
-                     bg-white/5 hover:bg-cyan-500/10 border border-white/10 hover:border-cyan-500/40
-                     text-slate-300 hover:text-cyan-300 transition-all duration-200 font-medium"
-        >
-          <Upload className="w-4 h-4" />
-          Upload Video CCTV
-        </button>
+      {/* Upload & YouTube Actions */}
+      <div className="flex flex-col gap-3">
+        <div>
+          <input ref={fileInputRef} type="file" accept="video/*" onChange={handleFile} className="hidden" id="video-file-input" />
+          <button
+            id="upload-video-btn"
+            onClick={() => fileInputRef.current?.click()}
+            className="w-full py-3 px-4 rounded-xl flex items-center justify-center gap-3
+                       bg-white/5 hover:bg-cyan-500/10 border border-white/10 hover:border-cyan-500/40
+                       text-slate-300 hover:text-cyan-300 transition-all duration-200 font-medium"
+          >
+            <Upload className="w-4 h-4" />
+            Upload Video CCTV
+          </button>
+        </div>
+
+        <div className="flex gap-2">
+          <input 
+            type="text" 
+            value={ytUrl}
+            onChange={(e) => setYtUrl(e.target.value)}
+            placeholder="Tempelkan Link YouTube di sini..." 
+            className="flex-1 px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-slate-200 focus:outline-none focus:border-red-500/50"
+          />
+          <button
+            onClick={async () => {
+              if (!ytUrl) return;
+              setIsResolving(true);
+              try {
+                const stream = await resolveYouTubeUrl(ytUrl);
+                loadVideoUrl(stream);
+                setTimeout(startCapture, 1500); // Give video time to load metadata
+              } catch (e: any) {
+                onError?.(e.message);
+              } finally {
+                setIsResolving(false);
+              }
+            }}
+            disabled={isResolving}
+            className="py-3 px-6 rounded-xl flex items-center justify-center gap-2 whitespace-nowrap
+                       bg-red-500/10 hover:bg-red-500/20 border border-red-500/30
+                       text-red-400 transition-all duration-200 font-medium disabled:opacity-50"
+          >
+            {isResolving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Youtube className="w-4 h-4" />}
+            Analisis YouTube
+          </button>
+        </div>
       </div>
 
       {/* Video + overlay canvas */}

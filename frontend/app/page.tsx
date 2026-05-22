@@ -165,14 +165,16 @@ function DashboardInner() {
   }, []);
 
   return (
-    <div className={`min-h-screen flex flex-col transition-colors duration-300
-      dark:bg-[#050d1a] bg-slate-100 dark:grid-bg
+    <div className={`min-h-screen flex flex-col transition-colors duration-500 relative
+      dark:bg-[#050d1a] bg-slate-50 dark:grid-bg
       ${isCritical ? 'dark:animate-alert-flash' : ''}`
     }>
+      {/* Background ambient glow */}
+      <div className="fixed inset-0 pointer-events-none bg-[radial-gradient(ellipse_at_top_right,_var(--tw-gradient-stops))] from-kci-blue/10 dark:from-neon-cyan/5 via-transparent to-transparent opacity-60 z-0"></div>
 
       {/* ── Header ── */}
-      <header className="sticky top-0 z-30 border-b border-kci-blue/20 dark:border-white/5
-        bg-white/90 dark:bg-[#050d1a]/85 backdrop-blur-md shadow-sm dark:shadow-kci-blue/10">
+      <header className="sticky top-0 z-30 border-b border-kci-blue/10 dark:border-white/5
+        bg-white/80 dark:bg-[#050d1a]/80 backdrop-blur-xl shadow-sm">
         <div className="px-4 md:px-6 py-3 flex items-center gap-3 flex-wrap">
 
           {/* Logo / Brand */}
@@ -298,7 +300,7 @@ function DashboardInner() {
 
       {/* ── Main Grid ── */}
       <motion.div
-        className="flex-1 p-4 md:p-6"
+        className="flex-1 p-4 md:p-6 lg:p-8 max-w-[1600px] mx-auto w-full z-10"
         variants={stagger}
         initial="hidden"
         animate="show"
@@ -306,14 +308,14 @@ function DashboardInner() {
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 md:gap-6">
 
           {/* Left col (Video + AI + History) */}
-          <div className="lg:col-span-2 space-y-4">
+          <div className="lg:col-span-2 space-y-6">
             <motion.section
               variants={fadeUp}
-              className={`rounded-2xl p-5 border transition-all duration-500
-                bg-white dark:bg-[#0a1628]/60 backdrop-blur
+              className={`rounded-3xl p-6 md:p-8 border transition-all duration-500
+                bg-white/70 dark:bg-[#0a1628]/60 backdrop-blur-xl shadow-sm hover:shadow-md
                 ${isCritical
-                  ? 'border-kci-red/60 shadow-lg shadow-kci-red/20'
-                  : 'border-kci-blue/20 dark:border-white/10 shadow-sm'
+                  ? 'border-kci-red/60 shadow-[0_0_30px_rgba(237,28,36,0.15)]'
+                  : 'border-kci-blue/10 dark:border-white/10 shadow-[0_4px_40px_rgba(0,0,0,0.03)] dark:shadow-[0_4px_40px_rgba(0,0,0,0.2)]'
                 }`}
             >
               <div className="flex items-center gap-2 mb-4">
@@ -332,31 +334,31 @@ function DashboardInner() {
               />
             </motion.section>
 
-            <motion.section variants={fadeUp} className="rounded-2xl p-5 border bg-white dark:bg-[#0a1628]/60 border-kci-blue/20 dark:border-white/10 shadow-sm">
+            <motion.section variants={fadeUp} className="rounded-3xl p-6 border bg-white/70 dark:bg-[#0a1628]/60 backdrop-blur-xl border-kci-blue/10 dark:border-white/10 shadow-sm hover:shadow-md transition-all">
               <AiReportPanel report={aiReport} loading={aiLoading} />
             </motion.section>
 
-            <motion.section variants={fadeUp} className="rounded-2xl p-5 border bg-white dark:bg-[#0a1628]/60 border-kci-blue/20 dark:border-white/10 shadow-sm">
+            <motion.section variants={fadeUp} className="rounded-3xl p-6 border bg-white/70 dark:bg-[#0a1628]/60 backdrop-blur-xl border-kci-blue/10 dark:border-white/10 shadow-sm hover:shadow-md transition-all">
               <HistoryPanel />
             </motion.section>
           </div>
 
           {/* Right sidebar */}
-          <aside className="space-y-4">
-            <motion.section variants={fadeUp} className="rounded-2xl p-5 border bg-white dark:bg-[#0a1628]/60 border-kci-blue/20 dark:border-white/10 shadow-sm">
-              <h2 className="text-[10px] font-semibold text-slate-400 dark:text-slate-500 uppercase tracking-widest mb-4">⚡ Status Sistem</h2>
+          <aside className="space-y-6">
+            <motion.section variants={fadeUp} className="rounded-3xl p-6 border bg-white/70 dark:bg-[#0a1628]/60 backdrop-blur-xl border-kci-blue/10 dark:border-white/10 shadow-sm hover:shadow-md transition-all">
+              <h2 className="text-[10px] font-bold text-kci-blue dark:text-slate-500 uppercase tracking-widest mb-5">⚡ Status Sistem</h2>
               <StatusIndicator analysis={currentAnalysis} />
             </motion.section>
 
-            <motion.section variants={fadeUp} className="rounded-2xl p-5 border bg-white dark:bg-[#0a1628]/60 border-kci-blue/20 dark:border-white/10 shadow-sm">
-              <h2 className="text-[10px] font-semibold text-slate-400 dark:text-slate-500 uppercase tracking-widest mb-4">📊 Statistik Kendaraan</h2>
+            <motion.section variants={fadeUp} className="rounded-3xl p-6 border bg-white/70 dark:bg-[#0a1628]/60 backdrop-blur-xl border-kci-blue/10 dark:border-white/10 shadow-sm hover:shadow-md transition-all">
+              <h2 className="text-[10px] font-bold text-kci-blue dark:text-slate-500 uppercase tracking-widest mb-5">📊 Statistik Kendaraan</h2>
               <Statistics
                 detections={currentAnalysis?.detections || []}
                 criticalCount={currentAnalysis?.critical_alert_count || 0}
               />
             </motion.section>
 
-            <motion.section variants={fadeUp} className="rounded-2xl p-5 border bg-white dark:bg-[#0a1628]/60 border-kci-blue/20 dark:border-white/10 shadow-sm">
+            <motion.section variants={fadeUp} className="rounded-3xl p-6 border bg-white/70 dark:bg-[#0a1628]/60 backdrop-blur-xl border-kci-blue/10 dark:border-white/10 shadow-sm hover:shadow-md transition-all">
               <EventLog logs={logs} />
             </motion.section>
           </aside>
