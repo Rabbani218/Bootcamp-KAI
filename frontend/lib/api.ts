@@ -1,7 +1,7 @@
 import axios from 'axios';
 import type { AnalyzeFrameResponse, HealthCheckResponse } from './types';
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'https://alex-universe11-bootcamp-ubsi-kai.hf.space';
 
 const apiClient = axios.create({
   baseURL: API_BASE_URL,
@@ -68,5 +68,20 @@ export const resetTracker = async () => {
   } catch (error) {
     console.error('❌ Reset tracker failed:', error);
     throw error;
+  }
+};
+
+/**
+ * Resolve YouTube URL ke Direct Stream URL
+ */
+export const resolveYouTubeUrl = async (youtubeUrl: string): Promise<string> => {
+  try {
+    const response = await apiClient.post('/api/v1/resolve-youtube', {
+      youtube_url: youtubeUrl
+    });
+    return response.data.stream_url;
+  } catch (error) {
+    console.error('❌ YouTube resolve failed:', error);
+    throw new Error('Gagal mengekstrak URL YouTube. Pastikan link valid dan video bersifat publik.');
   }
 };

@@ -15,7 +15,7 @@ interface AnomalyRecord {
   ai_report: string | null;
 }
 
-const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+const API = process.env.NEXT_PUBLIC_API_URL || 'https://alex-universe11-bootcamp-ubsi-kai.hf.space';
 
 export const HistoryPanel: React.FC = () => {
   const [records, setRecords] = useState<AnomalyRecord[]>([]);

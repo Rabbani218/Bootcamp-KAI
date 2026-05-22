@@ -89,9 +89,9 @@ function DashboardInner() {
   }, [soundOn]);
 
   const fetchAiReport = useCallback(async (response: AnalyzeFrameResponse) => {
-    setAiLoading(true); setAiReport(null);
+    setAiLoading(true);
+    const apiBase = process.env.NEXT_PUBLIC_API_URL || 'https://alex-universe11-bootcamp-ubsi-kai.hf.space';
     try {
-      const apiBase = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
       const res = await fetch(`${apiBase}/api/v1/ai-report`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -267,18 +267,17 @@ function DashboardInner() {
             animate={{ height: 'auto', opacity: 1 }}
             exit={{ height: 0, opacity: 0 }}
             id="cctv-disconnected-banner"
-            className="flex items-center gap-4 px-6 py-4
-              bg-gradient-to-r from-kci-red to-red-700 border-b-2 border-red-400
-              text-white font-bold text-sm z-20"
           >
-            <Cpu className="w-5 h-5 flex-shrink-0 animate-pulse" />
-            <div className="flex-1">
-              <div className="text-base font-black tracking-widest uppercase">🚨 KONEKSI BACKEND TERPUTUS</div>
-              <div className="text-xs font-normal text-red-200 mt-0.5">
-                Menghubungkan Ulang ke Server... (retry setiap 15 detik)
+            <div className="flex justify-between items-center bg-red-600 px-6 py-3 shadow-[0_0_15px_rgba(220,38,38,0.5)]">
+              <div className="flex items-center space-x-3">
+                <AlertTriangle className="text-white animate-pulse" size={24} />
+                <div>
+                  <h2 className="text-white font-bold tracking-wider">KONEKSI BACKEND TERPUTUS</h2>
+                  <p className="text-red-200 text-sm">Menghubungkan Ulang ke Server... (retry setiap 15 detik)</p>
+                </div>
               </div>
+              <div className="text-xs font-mono text-red-300">alex-universe11-bootcamp-ubsi-kai.hf.space</div>
             </div>
-            <div className="text-xs font-mono text-red-300">localhost:8000</div>
           </motion.div>
         )}
       </AnimatePresence>
