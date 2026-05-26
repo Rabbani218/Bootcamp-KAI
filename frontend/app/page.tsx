@@ -80,7 +80,7 @@ export default function Home() {
           {/* Video Stream Column */}
           <div className="lg:col-span-2 space-y-4">
             <div className="bg-gray-900 border border-gray-800 p-1 rounded-xl shadow-2xl">
-              <VideoStream backendUrl={backendUrl} />
+              <VideoStream backendUrl={backendUrl} streamKey={targetUrl} isUpdating={isUpdating} />
             </div>
             
             <div className="bg-gray-900 border border-gray-800 rounded-lg p-4 flex items-start gap-4">

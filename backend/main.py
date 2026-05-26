@@ -524,6 +524,16 @@ def set_url(req: SetUrlRequest):
     return {"status": "success", "target_url": safe_url}
 
 async def generate_mjpeg_stream():
+    # 1. Instant First-Frame Yielding (Pencegah Timeout Kritis)
+    init_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    cv2.putText(init_frame, "INITIALIZING AI ENGINE & YOUTUBE STREAM...", (20, 220), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+    cv2.putText(init_frame, "Please wait 10s", (240, 260), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+    ret, buffer = cv2.imencode('.jpg', init_frame)
+    if ret:
+        frame_bytes = buffer.tobytes()
+        yield (b'--frame\r\n'
+               b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+
     # Boundary format standard
     while app_state.running:
         frame_to_stream = None
