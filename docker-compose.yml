@@ -1,39 +1,51 @@
 version: '3.8'
 
 services:
-  # FastAPI Backend Service
+  # FastAPI Backend Service (Hugging Face / Local)
   api_backend:
     build:
-      context: .
+      context: ./backend
       dockerfile: Dockerfile
     container_name: traffic_anomaly_backend
     ports:
-      - "8000:8000"
+      - "8000:7860"
     environment:
       - API_HOST=0.0.0.0
-      - API_PORT=8000
-      - ENV=production
+      - API_PORT=7860
+      - ENV=development
       - LOG_LEVEL=INFO
     volumes:
-      - ./Dataset:/app/Dataset:ro           # Read-only untuk model
-      - ./logs:/app/logs                    # Untuk logs persistence
+      - ./Dataset:/home/user/app/Dataset:ro
+      - ./backend:/home/user/app
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:7860/api/health"]
       interval: 10s
       timeout: 5s
       retries: 3
       start_period: 30s
     networks:
       - traffic_network
-    # GPU support (uncomment jika ada GPU)
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: 1
-    #           capabilities: [gpu]
+
+  # Next.js Frontend Service
+  web_frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: traffic_anomaly_frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+      - /app/.next
+    restart: unless-stopped
+    depends_on:
+      - api_backend
+    networks:
+      - traffic_network
 
 networks:
   traffic_network:

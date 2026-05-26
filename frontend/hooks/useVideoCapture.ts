@@ -74,10 +74,11 @@ export const useVideoCapture = ({
     }
   };
 
-  const loadVideoFile = (file: File) => {
+    const loadVideoFile = (file: File) => {
     if (!videoRef.current) return;
     const url = URL.createObjectURL(file);
     videoRef.current.src = url;
+    videoRef.current.removeAttribute('crossOrigin');
     videoRef.current.onloadedmetadata = () => {
       if (canvasRef.current && videoRef.current) {
         canvasRef.current.width  = videoRef.current.videoWidth;
@@ -90,6 +91,23 @@ export const useVideoCapture = ({
       });
     };
     return () => URL.revokeObjectURL(url);
+  };
+
+  const loadVideoUrl = (url: string) => {
+    if (!videoRef.current) return;
+    videoRef.current.src = url;
+    videoRef.current.crossOrigin = 'anonymous'; // Important to avoid canvas CORS errors
+    videoRef.current.onloadedmetadata = () => {
+      if (canvasRef.current && videoRef.current) {
+        canvasRef.current.width  = videoRef.current.videoWidth;
+        canvasRef.current.height = videoRef.current.videoHeight;
+      }
+      videoRef.current!.loop = true;
+      videoRef.current!.play().catch((err) => {
+        console.error('Play error:', err);
+        onError?.(new Error('Failed to play video URL. Mungkin terblokir CORS.'));
+      });
+    };
   };
 
   const startCapture = () => {
@@ -115,5 +133,5 @@ export const useVideoCapture = ({
     return () => stopCapture();
   }, [enabled]);
 
-  return { videoRef, canvasRef, isCapturing, loadVideoFile, startCapture, stopCapture };
+  return { videoRef, canvasRef, isCapturing, loadVideoFile, loadVideoUrl, startCapture, stopCapture };
 };

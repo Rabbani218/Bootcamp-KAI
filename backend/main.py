@@ -276,7 +276,13 @@ async def yolo_inference_loop():
             if url:
                 cap = cv2.VideoCapture(url)
             else:
-                await asyncio.sleep(5)
+                log.warning("YOUTUBE DIBLOKIR! Menggunakan fallback video lokal.")
+                fallback_path = str(Path(__file__).parent / "evidence" / "anomaly_20260521_055051.mp4")
+                cap = cv2.VideoCapture(fallback_path)
+                
+            # Jika cap tetap None atau gagal open
+            if not cap or not cap.isOpened():
+                await asyncio.sleep(2)
                 continue
 
         ret, frame = cap.read()
@@ -284,6 +290,14 @@ async def yolo_inference_loop():
             log.warning("Stream putus atau gagal membaca video, mencoba reconnect...")
             cap.release()
             cap = None
+            
+            # Hasilkan dummy error frame agar frontend tidak blank
+            err_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+            cv2.putText(err_frame, "YOUTUBE ERROR / IP BLOCKED BY GOOGLE", (40, 240), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            cv2.putText(err_frame, "Menggunakan Fallback Video... Reconnecting...", (40, 280), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+            async with app_state.frame_lock:
+                app_state.last_frame = err_frame
+                
             await asyncio.sleep(2)
             continue
             

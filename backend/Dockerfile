@@ -1,32 +1,26 @@
-FROM python:3.11-slim
+FROM python:3.11-slim-bookworm
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libgl1-mesa-glx \
+# Instal dependensi sistem untuk OpenCV dan SQLite
+RUN apt-get update && apt-get install -y \
+    libgl1 \
     libglib2.0-0 \
     ffmpeg \
-    curl \
+    sqlite3 \
     && rm -rf /var/lib/apt/lists/*
 
-# Hugging Face Rule: Set up user
+# Aturan Wajib Hugging Face: Buat user non-root (UID 1000)
 RUN useradd -m -u 1000 user
-ENV HOME=/home/user \
-    PATH=/home/user/.local/bin:$PATH
-
-WORKDIR $HOME/app
-
-# Copy files and set permissions
-COPY --chown=user . $HOME/app/
-
-# Switch to non-root user
 USER user
+ENV PATH="/home/user/.local/bin:$PATH"
 
-# Install Python requirements
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+WORKDIR /home/user/app
 
-# Expose port 7860
-EXPOSE 7860
+# Salin requirements dan instal
+COPY --chown=user ./requirements.txt requirements.txt
+RUN pip install --no-cache-dir --upgrade -r requirements.txt
 
-# Run application
+# Salin seluruh kode backend
+COPY --chown=user . /home/user/app
+
+# Port wajib Hugging Face
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "7860"]
