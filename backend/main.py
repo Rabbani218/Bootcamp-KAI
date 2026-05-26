@@ -4,18 +4,20 @@ import json
 import logging
 import os
 import time
-import re
-from collections import deque
+import math
+import shutil
 from pathlib import Path
 from typing import Dict, List, Optional
-import math
 
 import cv2
 import numpy as np
 import yt_dlp
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+import aiohttp
+import paho.mqtt.client as mqtt
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -38,11 +40,14 @@ STATIONARY_TIME_THRESHOLD = 3.0  # detik kendaraan diam dianggap mogok
 STATIONARY_PIXEL_THRESHOLD = 15.0 # jarak maksimum pixel (centroid) untuk dianggap diam
 
 FRONTEND_URL = os.getenv("FRONTEND_URL", "*")
+DJKA_WEBHOOK_URL = os.getenv("DJKA_WEBHOOK_URL", "https://httpbin.org/post")
+MQTT_BROKER = os.getenv("MQTT_BROKER", "test.mosquitto.org")
 
 class AppState:
     def __init__(self):
-        self.stream_url: Optional[str] = None
+        self.source_mode: str = "youtube" # "youtube", "rtsp", "upload"
         self.target_url: str = "https://www.youtube.com/watch?v=q7lvnYVuqNY"
+        self.stream_url: Optional[str] = None
         self.last_frame: Optional[np.ndarray] = None
         self.last_detections: List[Dict] = []
         self.gemini_report: Dict = {"status": "MENGINISIALISASI", "lokasi": "Mencari data...", "narasi": "Sistem sedang dijalankan."}
@@ -238,8 +243,59 @@ def enhance_low_light(frame: np.ndarray) -> np.ndarray:
     limg = cv2.merge((cl, a, b))
     return cv2.cvtColor(limg, cv2.COLOR_LAB2BGR)
 
-# ── Background Tasks ──────────────────────────────────────────────────────────
+# ── Alert Dispatcher (IoT & DJKA Webhook) ─────────────────────────────────────
+class AlertDispatcher:
+    def __init__(self):
+        self.mqtt_client = mqtt.Client(client_id="NusaRail_Dispatcher")
+        try:
+            self.mqtt_client.connect(MQTT_BROKER, 1883, 60)
+            self.mqtt_client.loop_start()
+            log.info("MQTT Connected")
+        except Exception as e:
+            log.warning(f"MQTT gagal terhubung: {e}")
+            
+    async def dispatch_alert(self, lokasi: str, bahaya: bool, frame: np.ndarray):
+        timestamp = int(time.time())
+        filename = f"snapshot_{timestamp}.jpg"
+        filepath = os.path.join("temp_snapshots", filename)
+        
+        cv2.imwrite(filepath, frame)
+        
+        # Cleanup old snapshots > 10 files
+        try:
+            files = sorted(Path("temp_snapshots").glob("*.jpg"), key=os.path.getmtime)
+            if len(files) > 10:
+                os.remove(files[0])
+        except:
+            pass
 
+        # Mock public URL based on HF space structure or just path
+        snapshot_url = f"/snapshots/{filename}"
+        
+        payload = {
+            "timestamp": timestamp,
+            "lokasi": lokasi,
+            "tingkat_bahaya": "KRITIS" if bahaya else "PERINGATAN",
+            "snapshot_url": snapshot_url
+        }
+        
+        # Webhook
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(DJKA_WEBHOOK_URL, json=payload, timeout=5) as resp:
+                    log.info(f"Webhook DJKA response: {resp.status}")
+        except Exception as e:
+            log.error(f"Gagal kirim Webhook: {e}")
+            
+        # MQTT Publish
+        try:
+            self.mqtt_client.publish("nusarail/alerts/gate", json.dumps(payload))
+        except Exception as e:
+            log.error(f"Gagal publish MQTT: {e}")
+
+alert_dispatcher = AlertDispatcher()
+
+# ── Background Tasks ──────────────────────────────────────────────────────────
 async def broadcast_gemini_report():
     if not app_state.clients: return
     # Override logic: Jika YOLO bahaya, override status AI
@@ -270,57 +326,78 @@ async def yolo_inference_loop():
     
     cap = None
     failed_reads = 0
+    current_mode = None
+    current_target = None
     
-    # State Tracker Objek (Centroid Tracking Sederhana)
-    # id -> {"centroid": (cx, cy), "first_seen": timestamp, "last_seen": timestamp, "mogok": bool}
     trackers = {}
     next_id = 1
     
     app_state.running = True
     
     while app_state.running:
-        if cap is None:
-            cookie_path = os.path.join(os.path.dirname(__file__), 'cookies.txt')
-            has_cookies = os.path.exists(cookie_path)
+        if app_state.source_mode != current_mode or app_state.target_url != current_target:
+            if cap is not None:
+                cap.release()
+                cap = None
+            current_mode = app_state.source_mode
+            current_target = app_state.target_url
+            failed_reads = 0
             
-            if not has_cookies:
-                warn_frame = generate_text_frame("WARNING: cookies.txt NOT FOUND.\nYOUTUBE MAY BLOCK THIS STREAM.", bg_color=(0, 128, 255)) # Oranye BGR
-                async with app_state.frame_lock:
-                    app_state.last_frame = warn_frame
-                await asyncio.sleep(3) # Tahan 3 detik agar terbaca
-            else:
-                # 1. Yield frame kuning (INITIALIZING STREAM...)
-                init_frame = generate_text_frame("INITIALIZING STREAM...\nExtracting YouTube URL (w/ Cookies)...", bg_color=(0, 150, 150))
+        if cap is None:
+            if current_mode == "youtube":
+                cookie_path = os.path.join(os.path.dirname(__file__), 'cookies.txt')
+                if not os.path.exists(cookie_path):
+                    warn_frame = generate_text_frame("WARNING: cookies.txt NOT FOUND.\nYOUTUBE MAY BLOCK THIS STREAM.", bg_color=(0, 128, 255))
+                    async with app_state.frame_lock:
+                        app_state.last_frame = warn_frame
+                    await asyncio.sleep(3)
+                else:
+                    init_frame = generate_text_frame("INITIALIZING STREAM...\nExtracting YouTube URL (w/ Cookies)...", bg_color=(0, 150, 150))
+                    async with app_state.frame_lock:
+                        app_state.last_frame = init_frame
+                
+                log.info("Mencoba membuat koneksi stream YouTube...")
+                url_result = await extract_youtube_url_async(current_target)
+                
+                if url_result == "TIMEOUT":
+                    err_frame = generate_text_frame("ERROR: YOUTUBE BLOCKED HF IP (TIMEOUT).\nTRY ANOTHER URL.", bg_color=(0, 0, 200))
+                    async with app_state.frame_lock:
+                        app_state.last_frame = err_frame
+                    await asyncio.sleep(5)
+                    continue
+                elif url_result == "ERROR" or not url_result:
+                    err_frame = generate_text_frame("ERROR: VIDEO RESTRICTED OR INVALID.", bg_color=(0, 0, 200))
+                    async with app_state.frame_lock:
+                        app_state.last_frame = err_frame
+                    await asyncio.sleep(5)
+                    continue
+                cap = cv2.VideoCapture(url_result)
+            
+            elif current_mode == "rtsp":
+                init_frame = generate_text_frame("INITIALIZING RTSP CCTV...", bg_color=(150, 100, 0))
                 async with app_state.frame_lock:
                     app_state.last_frame = init_frame
+                log.info(f"Connecting to RTSP: {current_target}")
+                cap = cv2.VideoCapture(current_target)
                 
-            log.info("Mencoba membuat koneksi stream YouTube...")
-            url_result = await extract_youtube_url_async(app_state.target_url)
-            
-            if url_result == "TIMEOUT":
-                # 2. Jika yt-dlp Timeout (>15s): yield frame merah
-                err_frame = generate_text_frame("ERROR: YOUTUBE BLOCKED HF IP (TIMEOUT).\nTRY ANOTHER URL.", bg_color=(0, 0, 200))
+            elif current_mode == "upload":
+                init_frame = generate_text_frame("INITIALIZING LOCAL VIDEO UPLOAD...", bg_color=(0, 100, 150))
                 async with app_state.frame_lock:
-                    app_state.last_frame = err_frame
-                await asyncio.sleep(5)
-                continue
-            elif url_result == "ERROR" or not url_result:
-                # 3. Jika DownloadError: yield frame merah
-                err_frame = generate_text_frame("ERROR: VIDEO RESTRICTED OR INVALID.", bg_color=(0, 0, 200))
-                async with app_state.frame_lock:
-                    app_state.last_frame = err_frame
-                await asyncio.sleep(5)
-                continue
+                    app_state.last_frame = init_frame
+                cap = cv2.VideoCapture(current_target)
                 
-            cap = cv2.VideoCapture(url_result)
             failed_reads = 0
 
         ret, frame = cap.read()
         if not ret:
             failed_reads += 1
+            if current_mode == "upload":
+                log.info("Video lokal selesai diputar. Looping kembali.")
+                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                continue
+                
             if failed_reads >= 10:
-                # 4. Fail-Safe Loop, gagal baca 10x
-                log.warning("Stream putus atau gagal membaca video 10x beruntun. Menutup koneksi.")
+                log.warning("Stream putus atau gagal membaca video 10x beruntun.")
                 err_frame = generate_text_frame("STREAM LOST.\nFailed to read 10 frames.", bg_color=(0, 0, 200))
                 async with app_state.frame_lock:
                     app_state.last_frame = err_frame
@@ -329,8 +406,10 @@ async def yolo_inference_loop():
                 await asyncio.sleep(5)
             continue
             
-        # Reset counter jika sukses baca
         failed_reads = 0
+        
+        if current_mode == "upload":
+            await asyncio.sleep(1 / 15.0)
             
         current_time = time.time()
         
@@ -401,8 +480,18 @@ async def yolo_inference_loop():
                 det['mogok'] = is_mogok
                 
                 # Cek danger
-                if det['cls'] == 'train' or is_mogok:
+                if det['cls'] == 'train':
                     yolo_is_danger = True
+                elif is_mogok:
+                    yolo_is_danger = True
+                    # Dispatch Alert jika mogok > threshold
+                    if current_time - tdata.get('last_alert_time', 0) > 30: # Cooldown 30 detik
+                        asyncio.create_task(alert_dispatcher.dispatch_alert(
+                            lokasi=app_state.gemini_report.get("lokasi", "Unknown"),
+                            bahaya=True,
+                            frame=frame
+                        ))
+                        tdata['last_alert_time'] = current_time
 
             trackers = new_trackers
             app_state.yolo_danger = yolo_is_danger
@@ -538,6 +627,12 @@ async def gemini_analysis_loop():
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
+# Create temp dirs if not exist
+os.makedirs("temp", exist_ok=True)
+os.makedirs("temp_snapshots", exist_ok=True)
+
+app.mount("/snapshots", StaticFiles(directory="temp_snapshots"), name="snapshots")
+
 @app.on_event("startup")
 async def startup_event():
     asyncio.create_task(yolo_inference_loop())
@@ -549,24 +644,46 @@ async def shutdown_event():
 
 @app.get("/api/health")
 def health_check():
-    return {"status": "ok", "running": app_state.running, "uptime": time.time()}
+    return {
+        "status": "ok", 
+        "running": app_state.running, 
+        "djka_connected": True, 
+        "mqtt_connected": alert_dispatcher.mqtt_client.is_connected()
+    }
 
-@app.get("/api/logs")
-def get_logs():
-    try:
-        with open("debug.log", "r") as f:
-            lines = f.readlines()
-            return {"logs": "".join(lines[-100:])}
-    except Exception as e:
-        return {"error": str(e)}
+class SetUrlRequest(BaseModel):
+    youtube_url: Optional[str] = None
+    rtsp_url: Optional[str] = None
+    mode: str = "youtube"
 
 @app.post("/api/set_url")
 def set_url(req: SetUrlRequest):
-    safe_url = sanitize_url(req.youtube_url)
-    app_state.target_url = safe_url
-    # Reset yt-dlp cache URL to force extraction on next frame
+    if req.mode == "youtube" and req.youtube_url:
+        safe_url = sanitize_url(req.youtube_url)
+        app_state.target_url = safe_url
+        app_state.source_mode = "youtube"
+    elif req.mode == "rtsp" and req.rtsp_url:
+        app_state.target_url = req.rtsp_url
+        app_state.source_mode = "rtsp"
+        
     app_state.stream_url = None 
-    return {"status": "success", "target_url": safe_url}
+    return {"status": "success", "mode": app_state.source_mode, "target_url": app_state.target_url}
+
+@app.post("/api/upload")
+async def upload_video(file: UploadFile = File(...)):
+    # Auto cleanup old files
+    for old_file in Path("temp").glob("*.*"):
+        try:
+            os.remove(old_file)
+        except: pass
+        
+    file_path = f"temp/{file.filename}"
+    with open(file_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+        
+    app_state.target_url = file_path
+    app_state.source_mode = "upload"
+    return {"status": "success", "filename": file.filename}
 
 async def generate_mjpeg_stream():
     # 1. Instant First-Frame Yielding (Pencegah Timeout Kritis)

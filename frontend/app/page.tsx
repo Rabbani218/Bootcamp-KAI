@@ -1,7 +1,9 @@
 "use client";
 
 import dynamic from 'next/dynamic';
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import axios from 'axios';
+import { Youtube, Video, Upload, Activity, Radio } from 'lucide-react';
 
 const VideoStream = dynamic(() => import('@/components/VideoStream'), { ssr: false });
 const GeminiOverlay = dynamic(() => import('@/components/GeminiOverlay'), { ssr: false });
@@ -13,22 +15,79 @@ export default function Home() {
   }
   const backendWsUrl = backendUrl.replace('http', 'ws') + '/api/ws/gemini';
   
-  const [targetUrl, setTargetUrl] = useState("https://www.youtube.com/watch?v=q7lvnYVuqNY");
+  const [activeTab, setActiveTab] = useState<'youtube' | 'rtsp' | 'upload'>('youtube');
+  const [youtubeUrl, setYoutubeUrl] = useState("https://www.youtube.com/watch?v=q7lvnYVuqNY");
+  const [rtspUrl, setRtspUrl] = useState("");
+  const [uploadProgress, setUploadProgress] = useState(0);
   const [isUpdating, setIsUpdating] = useState(false);
+  const [healthInfo, setHealthInfo] = useState({ djka_connected: false, mqtt_connected: false });
 
-  const handleUpdateUrl = async (e: React.FormEvent) => {
+  useEffect(() => {
+    const fetchHealth = async () => {
+      try {
+        const res = await fetch(`${backendUrl}/api/health`);
+        const data = await res.json();
+        setHealthInfo({
+          djka_connected: data.djka_connected || false,
+          mqtt_connected: data.mqtt_connected || false
+        });
+      } catch (err) {}
+    };
+    fetchHealth();
+    const iv = setInterval(fetchHealth, 10000);
+    return () => clearInterval(iv);
+  }, [backendUrl]);
+
+  const handleUpdateUrl = async (e: React.FormEvent, mode: 'youtube' | 'rtsp') => {
     e.preventDefault();
     setIsUpdating(true);
     try {
+      const payload = mode === 'youtube' 
+        ? { mode, youtube_url: youtubeUrl } 
+        : { mode, rtsp_url: rtspUrl };
+        
       const res = await fetch(`${backendUrl}/api/set_url`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ youtube_url: targetUrl })
+        body: JSON.stringify(payload)
       });
       if (!res.ok) throw new Error("Gagal update URL");
     } catch (err) {
       console.error(err);
-      alert("Gagal memperbarui URL Stream ke Backend.");
+      alert("Gagal menyambungkan ke Backend.");
+    }
+    setIsUpdating(false);
+  };
+
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!e.target.files || e.target.files.length === 0) return;
+    const file = e.target.files[0];
+    
+    // Validasi < 50MB
+    if (file.size > 50 * 1024 * 1024) {
+      alert("File terlalu besar. Maksimal 50MB.");
+      return;
+    }
+
+    const formData = new FormData();
+    formData.append("file", file);
+
+    setIsUpdating(true);
+    setUploadProgress(0);
+
+    try {
+      await axios.post(`${backendUrl}/api/upload`, formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+        onUploadProgress: (progressEvent) => {
+          if (progressEvent.total) {
+            const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total);
+            setUploadProgress(percentCompleted);
+          }
+        }
+      });
+    } catch (err) {
+      console.error("Upload error", err);
+      alert("Gagal mengunggah video");
     }
     setIsUpdating(false);
   };
@@ -40,71 +99,112 @@ export default function Home() {
         {/* Header */}
         <header className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-gray-800 pb-6">
           <div>
-            <h1 className="text-3xl font-bold bg-gradient-to-r from-blue-400 to-emerald-400 bg-clip-text text-transparent">
-              NusaRail Sentinel
+            <h1 className="text-3xl font-bold bg-gradient-to-r from-blue-400 to-emerald-400 bg-clip-text text-transparent flex items-center gap-2">
+              <Activity className="w-8 h-8 text-emerald-400" /> NusaRail Sentinel
             </h1>
-            <p className="text-gray-400 mt-1">Sistem Peringatan Dini Perlintasan Kereta Api Real-time (Enterprise Hardened)</p>
+            <p className="text-gray-400 mt-1">Enterprise-Grade Early Warning System (Multi-Source Input)</p>
           </div>
           
-          <div className="flex items-center gap-3 bg-gray-900 border border-gray-800 rounded-lg px-4 py-2">
-            <span className="relative flex h-3 w-3">
-              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-              <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-500"></span>
-            </span>
-            <span className="text-sm font-medium text-gray-300">Sistem Aktif (Zero-Lag)</span>
+          <div className="flex flex-col sm:flex-row gap-4">
+            <div className="flex items-center gap-3 bg-gray-900 border border-gray-800 rounded-lg px-4 py-2">
+              <span className="relative flex h-3 w-3">
+                <span className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${healthInfo.djka_connected ? 'bg-emerald-400' : 'bg-red-400'}`}></span>
+                <span className={`relative inline-flex rounded-full h-3 w-3 ${healthInfo.djka_connected ? 'bg-emerald-500' : 'bg-red-500'}`}></span>
+              </span>
+              <span className="text-sm font-medium text-gray-300">DJKA Webhook: {healthInfo.djka_connected ? 'Connected' : 'Offline'}</span>
+            </div>
+            
+            <div className="flex items-center gap-3 bg-gray-900 border border-gray-800 rounded-lg px-4 py-2">
+              <span className="relative flex h-3 w-3">
+                <span className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${healthInfo.mqtt_connected ? 'bg-emerald-400' : 'bg-red-400'}`}></span>
+                <span className={`relative inline-flex rounded-full h-3 w-3 ${healthInfo.mqtt_connected ? 'bg-emerald-500' : 'bg-red-500'}`}></span>
+              </span>
+              <span className="text-sm font-medium text-gray-300">MQTT Signaling: {healthInfo.mqtt_connected ? 'Active' : 'Offline'}</span>
+            </div>
           </div>
         </header>
 
-        {/* Input Form URL */}
-        <form onSubmit={handleUpdateUrl} className="flex gap-2">
-          <input 
-            type="url" 
-            value={targetUrl}
-            onChange={(e) => setTargetUrl(e.target.value)}
-            className="flex-1 bg-gray-900 border border-gray-700 text-white rounded-md px-4 py-2 focus:outline-none focus:border-blue-500"
-            placeholder="Masukkan URL YouTube Live Stream..."
-            required
-          />
-          <button 
-            type="submit" 
-            disabled={isUpdating}
-            className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-md font-medium transition disabled:opacity-50"
-          >
-            {isUpdating ? 'Menyambungkan...' : 'Pantau Stream'}
-          </button>
-        </form>
+        {/* Input Controls */}
+        <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 shadow-xl">
+          <div className="flex gap-4 border-b border-gray-700 pb-4 mb-4">
+            <button 
+              onClick={() => setActiveTab('youtube')}
+              className={`flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition ${activeTab === 'youtube' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white'}`}
+            >
+              <Youtube className="w-5 h-5" /> YouTube Live
+            </button>
+            <button 
+              onClick={() => setActiveTab('rtsp')}
+              className={`flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition ${activeTab === 'rtsp' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white'}`}
+            >
+              <Radio className="w-5 h-5" /> RTSP CCTV
+            </button>
+            <button 
+              onClick={() => setActiveTab('upload')}
+              className={`flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition ${activeTab === 'upload' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white'}`}
+            >
+              <Upload className="w-5 h-5" /> Local Video
+            </button>
+          </div>
+
+          {activeTab === 'youtube' && (
+            <form onSubmit={(e) => handleUpdateUrl(e, 'youtube')} className="flex gap-2">
+              <input 
+                type="url" value={youtubeUrl} onChange={(e) => setYoutubeUrl(e.target.value)}
+                className="flex-1 bg-gray-800 border border-gray-700 text-white rounded-md px-4 py-2 focus:outline-none focus:border-blue-500"
+                placeholder="https://www.youtube.com/watch?v=..." required
+              />
+              <button type="submit" disabled={isUpdating} className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-md font-medium transition disabled:opacity-50 min-w-[150px]">
+                {isUpdating ? 'Loading...' : 'Stream YouTube'}
+              </button>
+            </form>
+          )}
+
+          {activeTab === 'rtsp' && (
+            <form onSubmit={(e) => handleUpdateUrl(e, 'rtsp')} className="flex gap-2">
+              <input 
+                type="text" value={rtspUrl} onChange={(e) => setRtspUrl(e.target.value)}
+                className="flex-1 bg-gray-800 border border-gray-700 text-white rounded-md px-4 py-2 focus:outline-none focus:border-blue-500"
+                placeholder="rtsp://username:pass@192.168.1.100:554/stream" required
+              />
+              <button type="submit" disabled={isUpdating} className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-md font-medium transition disabled:opacity-50 min-w-[150px]">
+                {isUpdating ? 'Loading...' : 'Connect CCTV'}
+              </button>
+            </form>
+          )}
+
+          {activeTab === 'upload' && (
+            <div className="flex items-center gap-4">
+              <input 
+                type="file" 
+                accept="video/mp4,video/x-m4v,video/*"
+                onChange={handleFileUpload}
+                disabled={isUpdating}
+                className="block w-full text-sm text-gray-400 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-blue-600 file:text-white hover:file:bg-blue-700 disabled:opacity-50"
+              />
+              {isUpdating && uploadProgress > 0 && (
+                <div className="flex-1">
+                  <div className="w-full bg-gray-700 rounded-full h-2.5">
+                    <div className="bg-blue-600 h-2.5 rounded-full transition-all duration-300" style={{ width: `${uploadProgress}%` }}></div>
+                  </div>
+                  <p className="text-xs text-gray-400 mt-1">Uploading... {uploadProgress}%</p>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
 
         {/* Main Content Area */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          
-          {/* Video Stream Column */}
           <div className="lg:col-span-2 space-y-4">
             <div className="bg-gray-900 border border-gray-800 p-1 rounded-xl shadow-2xl">
-              <VideoStream backendUrl={backendUrl} streamKey={targetUrl} isUpdating={isUpdating} />
-            </div>
-            
-            <div className="bg-gray-900 border border-gray-800 rounded-lg p-4 flex items-start gap-4">
-              <div className="bg-blue-900/30 p-2 rounded-lg text-blue-400">
-                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                </svg>
-              </div>
-              <div>
-                <h3 className="font-medium text-gray-200">Hardware & AI Engine</h3>
-                <p className="text-sm text-gray-400 mt-1">
-                  YOLOv8 ONNX (CPU) with Stationary Object Tracking + Gemini 2.0 Flash (JSON Fallback) + MJPEG Auto-Reconnect.
-                </p>
-              </div>
+              <VideoStream backendUrl={backendUrl} mode={activeTab} streamKey={activeTab === 'youtube' ? youtubeUrl : (activeTab === 'rtsp' ? rtspUrl : 'upload')} isUpdating={isUpdating} />
             </div>
           </div>
-
-          {/* Sidebar / Gemini AI Column */}
           <div className="lg:col-span-1">
             <GeminiOverlay backendWsUrl={backendWsUrl} />
           </div>
-          
         </div>
-        
       </div>
     </main>
   );

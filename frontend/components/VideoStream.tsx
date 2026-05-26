@@ -5,10 +5,11 @@ import { useEffect, useRef, useState } from 'react';
 interface VideoStreamProps {
   backendUrl: string;
   streamKey?: string;
+  mode?: string;
   isUpdating?: boolean;
 }
 
-export default function VideoStream({ backendUrl, streamKey, isUpdating }: VideoStreamProps) {
+export default function VideoStream({ backendUrl, streamKey, mode, isUpdating }: VideoStreamProps) {
   const [error, setError] = useState(false);
   const [streamUrl, setStreamUrl] = useState(`${backendUrl}/api/stream`);
   const [retryCount, setRetryCount] = useState(0);
@@ -21,8 +22,8 @@ export default function VideoStream({ backendUrl, streamKey, isUpdating }: Video
     setError(false);
     setIsStreamLoading(true);
     // Tambahkan parameter unik agar cache tertembus
-    setStreamUrl(`${backendUrl}/api/stream?k=${encodeURIComponent(streamKey || '')}&t=${Date.now()}`);
-  }, [backendUrl, streamKey, isUpdating]);
+    setStreamUrl(`${backendUrl}/api/stream?k=${encodeURIComponent(streamKey || '')}&m=${mode || ''}&t=${Date.now()}`);
+  }, [backendUrl, streamKey, mode, isUpdating]);
 
   const handleImageError = () => {
     console.warn("MJPEG stream error. Mencoba auto-reconnect...");
