@@ -92,6 +92,10 @@ def generate_text_frame(message: str, bg_color=(0, 0, 0), text_color=(255, 255, 
 async def extract_youtube_url_async(url: str) -> Optional[str]:
     def sync_extract():
         log.info(f"Mengekstrak URL dari: {url}")
+        
+        cookie_path = os.path.join(os.path.dirname(__file__), 'cookies.txt')
+        has_cookies = os.path.exists(cookie_path)
+        
         ydl_opts = {
             'format': 'best[height<=480]/worst',
             'socket_timeout': 10,
@@ -104,6 +108,11 @@ async def extract_youtube_url_async(url: str) -> Optional[str]:
             'noplaylist': True,
             'extractor_args': {'youtube': {'player_client': ['android', 'web']}}
         }
+        
+        if has_cookies:
+            ydl_opts['cookiefile'] = cookie_path
+            log.info("Menggunakan cookies.txt untuk autentikasi yt-dlp.")
+            
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
@@ -271,10 +280,19 @@ async def yolo_inference_loop():
     
     while app_state.running:
         if cap is None:
-            # 1. Yield frame kuning (INITIALIZING STREAM...)
-            init_frame = generate_text_frame("INITIALIZING STREAM...\nExtracting YouTube URL...", bg_color=(0, 150, 150))
-            async with app_state.frame_lock:
-                app_state.last_frame = init_frame
+            cookie_path = os.path.join(os.path.dirname(__file__), 'cookies.txt')
+            has_cookies = os.path.exists(cookie_path)
+            
+            if not has_cookies:
+                warn_frame = generate_text_frame("WARNING: cookies.txt NOT FOUND.\nYOUTUBE MAY BLOCK THIS STREAM.", bg_color=(0, 128, 255)) # Oranye BGR
+                async with app_state.frame_lock:
+                    app_state.last_frame = warn_frame
+                await asyncio.sleep(3) # Tahan 3 detik agar terbaca
+            else:
+                # 1. Yield frame kuning (INITIALIZING STREAM...)
+                init_frame = generate_text_frame("INITIALIZING STREAM...\nExtracting YouTube URL (w/ Cookies)...", bg_color=(0, 150, 150))
+                async with app_state.frame_lock:
+                    app_state.last_frame = init_frame
                 
             log.info("Mencoba membuat koneksi stream YouTube...")
             url_result = await extract_youtube_url_async(app_state.target_url)
