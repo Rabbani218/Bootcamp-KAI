@@ -167,17 +167,50 @@ async def extract_youtube_url_async(url: str) -> Optional[str]:
         return "ERROR"
 
 def load_yolo_onnx():
+    """Load YOLO ONNX model dengan fallback ke download model COCO standar jika tidak ada."""
     import onnxruntime as ort
-    model_path = Path(__file__).parent / YOLO_MODEL
-    if not model_path.exists():
-        model_path = Path(__file__).parent / "Dataset" / YOLO_MODEL
-        if not model_path.exists():
-            log.warning(f"Model {YOLO_MODEL} tidak ditemukan, fallback.")
+    
+    # Cari model di beberapa lokasi
+    search_paths = [
+        Path(__file__).parent / YOLO_MODEL,
+        Path(__file__).parent / "Dataset" / YOLO_MODEL,
+        Path(__file__).parent / "yolov8n.onnx",  # Fallback COCO model
+    ]
+    
+    model_path = None
+    for p in search_paths:
+        if p.exists():
+            model_path = p
+            break
+    
+    if model_path is None:
+        # Download YOLOv8n ONNX (model COCO standar, 6MB) sebagai fallback
+        log.warning(f"Model {YOLO_MODEL} tidak ditemukan. Mendownload yolov8n.onnx dari Ultralytics...")
+        try:
+            import urllib.request
+            fallback_path = Path(__file__).parent / "yolov8n.onnx"
+            url = "https://github.com/ultralytics/assets/releases/download/v0.0.0/yolov8n.onnx"
+            urllib.request.urlretrieve(url, str(fallback_path))
+            model_path = fallback_path
+            log.info(f"Fallback model berhasil didownload: {fallback_path}")
+        except Exception as e:
+            log.error(f"Gagal download fallback model: {e}")
             return None
+    
     try:
         log.info(f"Memuat model ONNX: {model_path}")
         providers = ['CPUExecutionProvider']
-        return ort.InferenceSession(str(model_path), providers=providers)
+        session = ort.InferenceSession(str(model_path), providers=providers)
+        
+        # Verifikasi input shape model
+        input_shape = session.get_inputs()[0].shape
+        log.info(f"Model dimuat. Input shape: {input_shape}")
+        
+        # Verifikasi output shape untuk menentukan jumlah kelas
+        output_shape = session.get_outputs()[0].shape
+        log.info(f"Model output shape: {output_shape}")
+        
+        return session
     except Exception as e:
         log.error(f"Gagal memuat model ONNX: {e}")
         return None
@@ -202,66 +235,115 @@ def preprocess_image(img, input_size=(640, 640)):
         img = img[None]
     return img, r, (dw, dh)
 
+# COCO class mapping lengkap (80 kelas)
+COCO_CLASSES = {
+    0: 'person', 1: 'bicycle', 2: 'car', 3: 'motorcycle',
+    4: 'airplane', 5: 'bus', 6: 'train', 7: 'truck',
+    8: 'boat', 9: 'traffic light', 10: 'fire hydrant',
+    11: 'stop sign', 12: 'parking meter'
+    # Hanya definisikan kelas yang relevan untuk efisiensi
+}
+
+# Kelas prioritas yang ingin kita deteksi
+TARGET_CLASSES = {0: 'person', 2: 'car', 3: 'motorcycle', 5: 'bus', 6: 'train', 7: 'truck'}
+
+# Confidence threshold per kelas (lebih rendah = lebih sensitif)
+CONF_THRESHOLDS = {
+    'train':      0.20,   # Kereta - deteksi agresif (penting!)
+    'car':        0.20,   # Mobil
+    'truck':      0.20,   # Truk
+    'bus':        0.20,   # Bus
+    'motorcycle': 0.20,   # Motor
+    'person':     0.25,   # Orang
+    'default':    0.20,   # Default untuk kelas lain
+}
+
 def postprocess(preds, orig_shape, ratio, pad):
+    """
+    Postprocess output YOLO ONNX.
+    Input preds: raw ONNX output tensor
+    orig_shape: (H, W) dari frame ASLI sebelum preprocessing
+    Mengembalikan list of {xyxy, conf, cls, orig_shape}
+    """
     preds = preds[0]
-    preds = preds.transpose()
-    boxes = preds[:, :4]
-    scores = preds[:, 4:]
+    preds = preds.transpose()  # (batch, 84, 8400) → (8400, 84)
+    
+    boxes    = preds[:, :4]           # center_x, center_y, width, height
+    scores   = preds[:, 4:]           # scores untuk setiap kelas
+    
     max_scores = np.max(scores, axis=1)
-    class_ids = np.argmax(scores, axis=1)
+    class_ids  = np.argmax(scores, axis=1)
     
-    # Dual Thresholds
-    classes = {0: 'person', 2: 'car', 3: 'motorcycle', 5: 'bus', 6: 'train', 7: 'truck'}
+    # Filter awal: buang semua yang conf < threshold global minimum
+    GLOBAL_MIN_CONF = 0.15
+    global_mask = max_scores >= GLOBAL_MIN_CONF
     
-    mask = []
-    for i, c_id in enumerate(class_ids):
-        conf = max_scores[i]
-        c_name = classes.get(int(c_id), 'unknown')
-        if c_name == 'train' and conf > 0.6:
-            mask.append(True)
-        elif c_name in ['car', 'motorcycle', 'bus', 'truck'] and conf > 0.25:
-            mask.append(True)
-        elif c_name == 'person' and conf > 0.25:
-            mask.append(True)
-        else:
-            mask.append(False)
-            
-    mask = np.array(mask)
-    if not np.any(mask):
+    if not np.any(global_mask):
         return []
-        
-    boxes = boxes[mask]
-    scores = max_scores[mask]
-    class_ids = class_ids[mask]
     
+    boxes     = boxes[global_mask]
+    max_scores = max_scores[global_mask]
+    class_ids = class_ids[global_mask]
+    
+    # Filter per kelas: hanya pertahankan kelas yang kita targetkan
+    class_mask = []
+    for i, c_id in enumerate(class_ids):
+        cls_name  = TARGET_CLASSES.get(int(c_id), None)
+        if cls_name is None:
+            class_mask.append(False)
+            continue
+        threshold = CONF_THRESHOLDS.get(cls_name, CONF_THRESHOLDS['default'])
+        class_mask.append(float(max_scores[i]) >= threshold)
+    
+    class_mask = np.array(class_mask)
+    if not np.any(class_mask):
+        return []
+    
+    boxes     = boxes[class_mask]
+    max_scores = max_scores[class_mask]
+    class_ids = class_ids[class_mask]
+    
+    # Konversi center_xywh → xyxy
     x1 = boxes[:, 0] - boxes[:, 2] / 2
     y1 = boxes[:, 1] - boxes[:, 3] / 2
     x2 = boxes[:, 0] + boxes[:, 2] / 2
     y2 = boxes[:, 1] + boxes[:, 3] / 2
     boxes = np.stack([x1, y1, x2, y2], axis=1)
     
+    # Hapus padding letterbox dan skala balik ke original frame
     boxes[:, 0] -= pad[0]
     boxes[:, 1] -= pad[1]
     boxes[:, 2] -= pad[0]
     boxes[:, 3] -= pad[1]
     boxes /= ratio
     
+    # Clip ke batas frame asli
     boxes[:, 0] = np.clip(boxes[:, 0], 0, orig_shape[1])
     boxes[:, 1] = np.clip(boxes[:, 1], 0, orig_shape[0])
     boxes[:, 2] = np.clip(boxes[:, 2], 0, orig_shape[1])
     boxes[:, 3] = np.clip(boxes[:, 3], 0, orig_shape[0])
     
-    indices = cv2.dnn.NMSBoxes(boxes.tolist(), scores.tolist(), 0.5, 0.45)
+    # NMS: score_threshold=0.0 karena kita sudah filter per kelas di atas
+    # iou_threshold=0.45 untuk menghilangkan duplikat
+    indices = cv2.dnn.NMSBoxes(boxes.tolist(), max_scores.tolist(), 0.0, 0.45)
     
     results = []
     if len(indices) > 0:
         for i in indices.flatten():
-            cls_id = int(class_ids[i])
+            cls_id   = int(class_ids[i])
+            cls_name = TARGET_CLASSES.get(cls_id, 'unknown')
             results.append({
-                "xyxy": boxes[i].astype(int).tolist(),
-                "conf": float(scores[i]),
-                "cls": classes[cls_id]
+                "xyxy":        boxes[i].astype(int).tolist(),
+                "conf":        float(max_scores[i]),
+                "cls":         cls_name,
+                "orig_shape":  orig_shape,   # Simpan dimensi frame asal untuk scaling
             })
+    
+    # Debug log (hanya jika ada deteksi)
+    if results:
+        summary = ", ".join([f"{d['cls']}({d['conf']:.2f})" for d in results])
+        log.info(f"[YOLO] Deteksi: {summary} | Frame: {orig_shape[1]}x{orig_shape[0]}")
+    
     return results
 
 def enhance_low_light(frame: np.ndarray) -> np.ndarray:
@@ -477,6 +559,7 @@ class VideoStreamer:
     # ──────────────────────────────────────────────────────────────────────────
     def _ai_worker_thread(self):
         log.info("[AIWorker] Thread YOLO dimulai.")
+        frame_count = 0
         
         while self.running:
             # Ambil salinan frame terbaru dari shared state
@@ -487,33 +570,53 @@ class VideoStreamer:
                 frame_copy = self.latest_frame.copy()
             
             if self.yolo_session is None:
-                time.sleep(0.1)
+                log.warning("[AIWorker] YOLO session None - menunggu...")
+                time.sleep(0.5)
                 continue
             
             try:
-                # Preprocessing: CLAHE low-light + resize ke 640 agar ONNX cepat
-                enhanced   = enhance_low_light(frame_copy)
+                frame_count += 1
+                orig_h, orig_w = frame_copy.shape[:2]
+                
+                # Preprocessing: CLAHE low-light enhancement
+                enhanced = enhance_low_light(frame_copy)
                 img_input, ratio, pad = preprocess_image(enhanced)
                 
-                # Inferensi ONNX YOLO (classes: 0=person, 2=car, 3=motorcycle, 5=bus, 6=train, 7=truck)
+                # Debug: log dimensi input sekali setiap 50 frame
+                if frame_count % 50 == 1:
+                    log.info(f"[AIWorker] Frame #{frame_count} | Orig: {orig_w}x{orig_h} | "
+                             f"YOLO input: {img_input.shape} | ratio={ratio:.3f} | pad={pad}")
+                
+                # Inferensi ONNX YOLO
                 input_name = self.yolo_session.get_inputs()[0].name
                 preds      = self.yolo_session.run(None, {input_name: img_input})[0]
                 
-                # Postprocess → list of {xyxy, conf, cls}
-                detections = postprocess(preds, frame_copy.shape[:2], ratio, pad)
+                # Debug: log output shape model sekali
+                if frame_count == 1:
+                    log.info(f"[AIWorker] Model output shape: {preds.shape} | "
+                             f"Total anchors: {preds.shape[-1] if len(preds.shape)==3 else preds.shape}")
+                
+                # Postprocess → list of {xyxy, conf, cls, orig_shape}
+                # orig_shape disimpan agar MJPEG generator bisa scale koordinat
+                detections = postprocess(preds, (orig_h, orig_w), ratio, pad)
+                
+                # Debug log setiap 30 frame
+                if frame_count % 30 == 0:
+                    log.info(f"[AIWorker] Frame #{frame_count}: {len(detections)} objek terdeteksi")
                 
                 # Simpan ke shared state (Non-Blocking Drop)
                 with self._det_lock:
                     self.latest_detections = detections
                     
-                # Sinkronisasi ke app_state untuk Tracking, Geo-Fencing & Telegram
+                # Sinkronisasi ke app_state
                 app_state.last_detections = detections
                 
             except Exception as e:
-                log.error(f"[AIWorker] Error YOLO: {e}")
-                time.sleep(0.05)
+                log.error(f"[AIWorker] Error YOLO frame #{frame_count}: {e}")
+                import traceback; traceback.print_exc()
+                time.sleep(0.1)
         
-        log.info("[AIWorker] Thread YOLO selesai.")
+        log.info(f"[AIWorker] Thread YOLO selesai. Total frame diproses: {frame_count}")
 
     # ──────────────────────────────────────────────────────────────────────────
     # Kontrol Lifecycle: start() dan stop()
@@ -922,9 +1025,19 @@ async def generate_mjpeg_stream():
         
         detections = streamer.get_latest_detections()
         
+        # ── [CRITICAL FIX] Catat dimensi ASLI sebelum resize ─────────────────
+        # Koordinat bbox dari AI Worker menggunakan dimensi asli (mis. 1280x720)
+        # Kita WAJIB scale koordinat sebelum menggambar di frame 640x360
+        orig_h_frame, orig_w_frame = frame.shape[:2]
+        
         # ── [EXTREME BANDWIDTH REDUCTION] Resize ke 640x360 ──────────────────
-        frame = cv2.resize(frame, (640, 360))
-        H, W = frame.shape[:2]
+        DISPLAY_W, DISPLAY_H = 640, 360
+        frame = cv2.resize(frame, (DISPLAY_W, DISPLAY_H))
+        H, W = DISPLAY_H, DISPLAY_W
+        
+        # Hitung faktor skala dari dimensi asli ke display
+        scale_x = DISPLAY_W / orig_w_frame
+        scale_y = DISPLAY_H / orig_h_frame
         
         # ── Render Geo-Fence Polygon ──────────────────────────────────────────
         polygon_abs = []
@@ -938,58 +1051,94 @@ async def generate_mjpeg_stream():
             cv2.addWeighted(overlay, 0.15, frame, 0.85, 0, frame)
             cv2.putText(frame, "DANGER ZONE", polygon_abs[0], cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
         else:
-            # Tampilkan ROI default hanya jika tidak ada polygon
-            cv2.rectangle(frame, (int(W*0.1), int(H*0.1)), (int(W*0.9), int(H*0.9)), (255, 255, 0), 1)
-            cv2.putText(frame, "ROI Default (Seluruh Layar)", (int(W*0.1), int(H*0.1)-5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 0), 1)
+            # ROI default - hanya tampilkan jika tidak ada polygon
+            cv2.rectangle(frame, (int(W*0.05), int(H*0.05)), (int(W*0.95), int(H*0.95)), (100, 100, 100), 1)
         
-        # ── [WAJIB EKSPLISIT] Render Bounding Box dari latest_detections ──────
-        # Sesuai spesifikasi: iterasi detections dan gambar dengan cv2.rectangle
+        # ── [WAJIB EKSPLISIT] Render Bounding Box dengan Coordinate Scaling ──
+        # PENTING: Scale koordinat dari resolusi asli ke 640x360 display
         LABEL_MAP = {
-            'car':        ('MOBIL',   (0, 255, 0)),
-            'truck':      ('TRUK',    (0, 200, 50)),
-            'bus':        ('BUS',     (50, 200, 0)),
-            'motorcycle': ('MOTOR',   (0, 255, 100)),
-            'train':      ('KERETA',  (0, 0, 255)),
-            'person':     ('ORANG',   (255, 200, 0)),
+            'car':        ('MOBIL',    (0,   255, 0  )),   # Hijau terang
+            'truck':      ('TRUK',     (0,   200, 100)),   # Hijau kebiruan
+            'bus':        ('BUS',      (255, 128, 0  )),   # Oranye
+            'motorcycle': ('MOTOR',    (0,   255, 200)),   # Cyan
+            'train':      ('KRL/KA',   (0,   0,   255)),   # Merah
+            'person':     ('ORANG',    (255, 200, 0  )),   # Kuning
         }
+        
         for det in detections:
-            x1, y1, x2, y2 = det['xyxy']
-            conf            = det['conf']
-            cls_name        = det.get('cls', 'unknown')
-            is_mogok        = det.get('mogok', False)
+            raw_x1, raw_y1, raw_x2, raw_y2 = det['xyxy']
+            conf     = det['conf']
+            cls_name = det.get('cls', 'unknown')
+            is_mogok = det.get('mogok', False)
             
-            label_text, box_color = LABEL_MAP.get(cls_name, (cls_name.upper(), (0, 255, 0)))
+            # ── SCALE koordinat bbox dari resolusi asli ke display 640x360 ──
+            # Cek apakah deteksi punya orig_shape (dari postprocess baru)
+            det_orig = det.get('orig_shape', (orig_h_frame, orig_w_frame))
+            det_scale_x = DISPLAY_W / det_orig[1]
+            det_scale_y = DISPLAY_H / det_orig[0]
             
-            # Override warna merah untuk kereta dan kendaraan mogok
+            x1 = int(raw_x1 * det_scale_x)
+            y1 = int(raw_y1 * det_scale_y)
+            x2 = int(raw_x2 * det_scale_x)
+            y2 = int(raw_y2 * det_scale_y)
+            
+            # Clip ke batas frame display
+            x1 = max(0, min(x1, DISPLAY_W - 1))
+            y1 = max(0, min(y1, DISPLAY_H - 1))
+            x2 = max(0, min(x2, DISPLAY_W - 1))
+            y2 = max(0, min(y2, DISPLAY_H - 1))
+            
+            # Abaikan bbox yang terlalu kecil (noise)
+            if (x2 - x1) < 5 or (y2 - y1) < 5:
+                continue
+            
+            label_text, box_color = LABEL_MAP.get(cls_name, (cls_name.upper(), (180, 180, 180)))
+            
+            # Override merah untuk bahaya
             if cls_name == 'train':
                 box_color  = (0, 0, 255)
-                label_text = f"KERETA API"
-            elif is_mogok:
-                box_color  = (0, 0, 255)
+                label_text = "KRL/KERETA API"
+            if is_mogok:
+                box_color  = (0, 0, 200)
                 label_text = f"MOGOK! {label_text}"
             
-            # Gambar bounding box
-            cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), box_color, 2)
+            # Ketebalan kotak tergantung confidence (lebih percaya diri = lebih tebal)
+            thickness = 3 if conf > 0.5 else 2
             
-            # Gambar label background (agar teks mudah terbaca)
-            label_full = f"{label_text} {conf:.2f}"
-            (lw, lh), _ = cv2.getTextSize(label_full, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-            cv2.rectangle(frame, (int(x1), max(0, int(y1)-lh-8)), (int(x1)+lw+4, int(y1)), box_color, -1)
-            cv2.putText(frame, label_full, (int(x1)+2, max(10, int(y1)-4)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
+            # Gambar bounding box
+            cv2.rectangle(frame, (x1, y1), (x2, y2), box_color, thickness)
+            
+            # Label dengan background gelap untuk keterbacaan
+            label_full = f"{label_text} {conf:.0%}"
+            (lw, lh), _ = cv2.getTextSize(label_full, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
+            label_y = max(lh + 4, y1)
+            cv2.rectangle(frame, (x1, label_y - lh - 6), (x1 + lw + 6, label_y), box_color, -1)
+            cv2.putText(frame, label_full, (x1 + 3, label_y - 3),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 1, cv2.LINE_AA)
+        
+        # ── Tampilkan jumlah objek di pojok kiri atas ─────────────────────────
+        obj_count = len(detections)
+        count_color = (0, 100, 255) if obj_count == 0 else (0, 255, 100)
+        cv2.putText(frame, f"AI: {obj_count} objek", (8, 22),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 3, cv2.LINE_AA)
+        cv2.putText(frame, f"AI: {obj_count} objek", (8, 22),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, count_color, 1, cv2.LINE_AA)
         
         # ── Timestamp Overlay ─────────────────────────────────────────────────
         ts = time.strftime("%Y-%m-%d %H:%M:%S")
-        cv2.putText(frame, f"NusaRail | {ts}", (5, H-8), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 3)
-        cv2.putText(frame, f"NusaRail | {ts}", (5, H-8), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
+        cv2.putText(frame, f"NusaRail | {ts}", (5, H - 8),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 0, 0), 3, cv2.LINE_AA)
+        cv2.putText(frame, f"NusaRail | {ts}", (5, H - 8),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.42, (255, 255, 255), 1, cv2.LINE_AA)
         
-        # ── [EXTREME COMPRESSION] Encode JPEG Quality=50 ─────────────────────
-        # Mengurangi beban memori dan bandwidth hingga 70% dibanding quality 95
-        ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 50])
+        # ── [EXTREME COMPRESSION] Encode JPEG Quality=55 ─────────────────────
+        ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 55])
         if ret:
             yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
         
         # ~30 FPS output rate ke frontend
         await asyncio.sleep(0.033)
+
 
 
 @app.get("/api/stream")
