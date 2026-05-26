@@ -270,11 +270,14 @@ async def yolo_inference_loop():
         yolo_frame = enhance_low_light(frame)
         
         try:
-            if app_state.yolo_session:
+            def run_yolo_sync(frame_np):
                 input_name = app_state.yolo_session.get_inputs()[0].name
-                img, ratio, pad = preprocess_image(yolo_frame)
+                img, ratio, pad = preprocess_image(frame_np)
                 preds = app_state.yolo_session.run(None, {input_name: img})[0]
-                detections = postprocess(preds, frame.shape[:2], ratio, pad)
+                return postprocess(preds, frame_np.shape[:2], ratio, pad)
+
+            if app_state.yolo_session:
+                detections = await asyncio.to_thread(run_yolo_sync, yolo_frame)
             else:
                 detections = []
                 
@@ -490,7 +493,7 @@ async def generate_mjpeg_stream():
         frame_to_stream = None
         async with app_state.frame_lock:
             if app_state.last_frame is not None:
-                frame_to_stream = app_state.last_frame.copy()
+                frame_to_stream = app_state.last_frame
                 
         if frame_to_stream is not None:
             ret, buffer = cv2.imencode('.jpg', frame_to_stream)
