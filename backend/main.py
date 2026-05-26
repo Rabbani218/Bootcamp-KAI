@@ -22,6 +22,10 @@ from pydantic import BaseModel
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler("debug.log")
+    ]
 )
 log = logging.getLogger(__name__)
 
@@ -54,7 +58,12 @@ app = FastAPI(title="NusaRail Sentinel Backend API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[FRONTEND_URL, "http://localhost:3000", "*"],
+    allow_origins=[
+        FRONTEND_URL, 
+        "http://localhost:3000", 
+        "https://bootcamp-kai.vercel.app", 
+        "*"
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -80,18 +89,32 @@ async def extract_youtube_url_async(url: str) -> Optional[str]:
             'quiet': True,
             'no_warnings': True,
             'noplaylist': True,
+            'nocheckcertificate': True,
             'extractor_args': {'youtube': {'player_client': ['android', 'web']}}
         }
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
-                if info.get('vcodec') == 'none':
-                    log.warning("Stream berupa audio-only, menolak.")
-                    return None
-                return info.get('url')
+                if info and info.get('url'):
+                    return info.get('url')
         except Exception as e:
-            log.error(f"Gagal mengekstrak YouTube URL: {e}")
-            return None
+            log.warning(f"Gagal mengekstrak stream live/default: {e}. Mencoba format VOD...")
+            # Coba ambil format VOD biasa sebagai fallback pertama
+            ydl_opts_vod = {
+                'format': 'bestvideo[height<=480]+bestaudio/best[height<=480]',
+                'quiet': True,
+                'no_warnings': True,
+                'noplaylist': True,
+                'nocheckcertificate': True
+            }
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts_vod) as ydl_vod:
+                    info_vod = ydl_vod.extract_info(url, download=False)
+                    if info_vod and info_vod.get('url'):
+                        return info_vod.get('url')
+            except Exception as e2:
+                log.error(f"Gagal total mengekstrak YouTube URL (Live & VOD): {e2}")
+        return None
             
     # Timeout extraction at 30 seconds
     try:
@@ -108,9 +131,13 @@ def load_yolo_onnx():
         if not model_path.exists():
             log.warning(f"Model {YOLO_MODEL} tidak ditemukan, fallback.")
             return None
-    log.info(f"Memuat model ONNX: {model_path}")
-    providers = ['CPUExecutionProvider']
-    return ort.InferenceSession(str(model_path), providers=providers)
+    try:
+        log.info(f"Memuat model ONNX: {model_path}")
+        providers = ['CPUExecutionProvider']
+        return ort.InferenceSession(str(model_path), providers=providers)
+    except Exception as e:
+        log.error(f"Gagal memuat model ONNX: {e}")
+        return None
 
 def preprocess_image(img, input_size=(640, 640)):
     shape = img.shape[:2]
@@ -254,7 +281,7 @@ async def yolo_inference_loop():
 
         ret, frame = cap.read()
         if not ret:
-            log.warning("Stream putus, mencoba reconnect...")
+            log.warning("Stream putus atau gagal membaca video, mencoba reconnect...")
             cap.release()
             cap = None
             await asyncio.sleep(2)
@@ -479,6 +506,15 @@ async def shutdown_event():
 def health_check():
     return {"status": "ok", "running": app_state.running, "uptime": time.time()}
 
+@app.get("/api/logs")
+def get_logs():
+    try:
+        with open("debug.log", "r") as f:
+            lines = f.readlines()
+            return {"logs": "".join(lines[-100:])}
+    except Exception as e:
+        return {"error": str(e)}
+
 @app.post("/api/set_url")
 def set_url(req: SetUrlRequest):
     safe_url = sanitize_url(req.youtube_url)
@@ -497,6 +533,15 @@ async def generate_mjpeg_stream():
                 
         if frame_to_stream is not None:
             ret, buffer = cv2.imencode('.jpg', frame_to_stream)
+            if ret:
+                frame = buffer.tobytes()
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+        else:
+            # Fallback frame abu-abu saat buffering awal atau jika gagal baca video
+            buff_frame = np.full((480, 640, 3), 128, dtype=np.uint8)
+            cv2.putText(buff_frame, "BUFFERING YOUTUBE / HF COLD START...", (40, 240), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+            ret, buffer = cv2.imencode('.jpg', buff_frame)
             if ret:
                 frame = buffer.tobytes()
                 yield (b'--frame\r\n'

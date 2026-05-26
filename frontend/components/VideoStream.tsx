@@ -12,17 +12,29 @@ export default function VideoStream({ backendUrl }: VideoStreamProps) {
   const [retryCount, setRetryCount] = useState(0);
   const imgRef = useRef<HTMLImageElement>(null);
 
+  const [isColdStart, setIsColdStart] = useState(false);
+
   useEffect(() => {
     // Reset saat base url ganti
     setError(false);
+    setIsColdStart(false);
     setStreamUrl(`${backendUrl}/api/stream?t=${Date.now()}`);
+    
+    // Deteksi Cold Start jika tidak ada gambar yang termuat dalam 5 detik
+    const timer = setTimeout(() => {
+      if (imgRef.current && !imgRef.current.complete) {
+        setIsColdStart(true);
+      }
+    }, 5000);
+    return () => clearTimeout(timer);
   }, [backendUrl]);
 
   const handleImageError = () => {
     console.warn("MJPEG stream error. Mencoba auto-reconnect...");
     setError(true);
+    setIsColdStart(false);
     
-    // Auto reconnect dengan interval bertingkat
+    // Auto reconnect dengan interval bertingkat (Exponential backoff sederhana)
     const delay = Math.min(2000 + (retryCount * 1000), 10000); // max 10s
     setTimeout(() => {
       setRetryCount(prev => prev + 1);
@@ -36,6 +48,7 @@ export default function VideoStream({ backendUrl }: VideoStreamProps) {
       console.log("Stream berhasil terkoneksi kembali.");
       setRetryCount(0);
     }
+    setIsColdStart(false);
   };
 
   return (
@@ -57,7 +70,19 @@ export default function VideoStream({ backendUrl }: VideoStreamProps) {
           <p>Koneksi stream terputus. Mencoba reconnect...</p>
         </div>
       )}
-      <div className="absolute top-4 left-4 bg-black/60 px-3 py-1 rounded-md flex items-center gap-2 text-sm text-white backdrop-blur-sm">
+      
+      {/* Indikator Cold Start */}
+      {isColdStart && !error && (
+        <div className="absolute inset-0 bg-black/80 flex flex-col items-center justify-center text-emerald-400 z-10 backdrop-blur-sm">
+           <svg className="w-12 h-12 mb-4 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+           </svg>
+           <p className="font-semibold tracking-wide animate-pulse">Waking up Hugging Face Server...</p>
+           <p className="text-sm text-gray-400 mt-2">Ini mungkin memakan waktu hingga 1-2 menit (Cold Start)</p>
+        </div>
+      )}
+
+      <div className="absolute top-4 left-4 bg-black/60 px-3 py-1 rounded-md flex items-center gap-2 text-sm text-white backdrop-blur-sm z-20">
         <span className={`w-2 h-2 rounded-full ${error ? 'bg-yellow-500' : 'bg-red-500 animate-pulse'}`}></span>
         {error ? 'RECONNECTING' : 'LIVE'}
       </div>
