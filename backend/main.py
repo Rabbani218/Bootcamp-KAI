@@ -391,9 +391,16 @@ async def yolo_inference_loop():
     trackers = {}
     next_id = 1
     
+    # Variabel untuk sinkronisasi video lokal & Frame Skipping
+    frame_counter = 0
+    original_fps = 25.0
+    frame_delay = 1.0 / 25.0
+    
     app_state.running = True
     
     while app_state.running:
+        start_time_loop = time.time()
+        
         if app_state.source_mode != current_mode or app_state.target_url != current_target:
             if cap is not None:
                 cap.release()
@@ -445,6 +452,15 @@ async def yolo_inference_loop():
                     app_state.last_frame = init_frame
                 cap = cv2.VideoCapture(current_target)
                 
+                # --- [1] Deteksi FPS Asli Video ---
+                # Mengambil nilai FPS asli dari metadata file MP4
+                original_fps = cap.get(cv2.CAP_PROP_FPS)
+                if original_fps <= 0 or math.isnan(original_fps):
+                    original_fps = 25.0 # Default jika metadata rusak
+                frame_delay = 1.0 / original_fps
+                frame_counter = 0
+                log.info(f"Video lokal dimuat. FPS asli: {original_fps}, Frame delay: {frame_delay:.4f} detik")
+                
             failed_reads = 0
 
         ret, frame = cap.read()
@@ -466,11 +482,8 @@ async def yolo_inference_loop():
             continue
             
         failed_reads = 0
-        
-        if current_mode == "upload":
-            await asyncio.sleep(1 / 15.0)
-            
         current_time = time.time()
+        frame_counter += 1
         H, W = frame.shape[:2]
         
         # Setup Absolute Polygon for Geo-Fencing Point-in-Polygon Test
@@ -480,20 +493,28 @@ async def yolo_inference_loop():
                 polygon_abs.append([int(pt['x'] * W), int(pt['y'] * H)])
             polygon_abs = np.array(polygon_abs, np.int32)
         
-        # Enhance frame for tracking/yolo
-        yolo_frame = enhance_low_light(frame)
-        
         try:
-            def run_yolo_sync(frame_np):
-                input_name = app_state.yolo_session.get_inputs()[0].name
-                img, ratio, pad = preprocess_image(frame_np)
-                preds = app_state.yolo_session.run(None, {input_name: img})[0]
-                return postprocess(preds, frame_np.shape[:2], ratio, pad)
+            # --- [2] Implementasi Algoritma AI Frame Skipping ---
+            # DILARANG keras menjalankan inferensi YOLO di setiap frame untuk menghindari bottleneck CPU.
+            # Jalankan inferensi YOLO hanya setiap 5 frame (sekitar 5 FPS jika video asli 25 FPS).
+            if frame_counter % 5 == 0 or len(app_state.last_detections) == 0:
+                yolo_frame = enhance_low_light(frame)
+                
+                def run_yolo_sync(frame_np):
+                    input_name = app_state.yolo_session.get_inputs()[0].name
+                    img, ratio, pad = preprocess_image(frame_np)
+                    preds = app_state.yolo_session.run(None, {input_name: img})[0]
+                    return postprocess(preds, frame_np.shape[:2], ratio, pad)
 
-            if app_state.yolo_session:
-                detections = await asyncio.to_thread(run_yolo_sync, yolo_frame)
+                if app_state.yolo_session:
+                    detections = await asyncio.to_thread(run_yolo_sync, yolo_frame)
+                else:
+                    detections = []
+                    
+                app_state.last_detections = detections
             else:
-                detections = []
+                # Frame antara: gunakan ulang hasil deteksi sebelumnya dari memori (Bounding Box Cache)
+                detections = app_state.last_detections
                 
             # --- Object Tracking & Stationary Logic ---
             current_centroids = []
@@ -614,7 +635,22 @@ async def yolo_inference_loop():
         async with app_state.frame_lock:
             app_state.last_frame = display_frame
             
-        await asyncio.sleep(0.001)
+        # --- [3] Sinkronisasi Waktu Eksekusi (Time Sync) ---
+        # Memaksa laju perputaran video lokal agar tidak mendahului kecepatan FPS aslinya
+        elapsed_time = time.time() - start_time_loop
+        if current_mode == "upload":
+            if elapsed_time < frame_delay:
+                # Menunggu sisa waktu yang dibutuhkan untuk mencapai target frame_delay asli
+                await asyncio.sleep(frame_delay - elapsed_time)
+            else:
+                # Jika pemrosesan terlalu lambat, biarkan yield lanjut (0 delay agar segera catch-up)
+                await asyncio.sleep(0.001)
+        else:
+            await asyncio.sleep(0.001)
+
+    # Memastikan cap ditutup dan memori dibersihkan saat loop berakhir
+    if cap is not None:
+        cap.release()
 
 async def gemini_analysis_loop():
     log.info("Gemini Analysis Loop started")
