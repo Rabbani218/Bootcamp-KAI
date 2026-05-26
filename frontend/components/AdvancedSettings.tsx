@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from 'react';
-import { ShieldAlert, Send, Map, Save } from 'lucide-react';
+import { ShieldAlert, Send, Map, Save, ServerCrash } from 'lucide-react';
 
 interface Point {
   x: number;
@@ -12,6 +12,10 @@ export default function AdvancedSettings({ backendUrl }: { backendUrl: string })
   const [telegramToken, setTelegramToken] = useState("");
   const [telegramChatId, setTelegramChatId] = useState("");
   const [isSavingTg, setIsSavingTg] = useState(false);
+  
+  const [djkaWebhook, setDjkaWebhook] = useState("https://httpbin.org/post");
+  const [mqttBroker, setMqttBroker] = useState("test.mosquitto.org");
+  const [isSavingIntegration, setIsSavingIntegration] = useState(false);
 
   // Default polygon coordinates (relative 0.0 - 1.0)
   const [polygon, setPolygon] = useState<Point[]>([
@@ -38,6 +42,24 @@ export default function AdvancedSettings({ backendUrl }: { backendUrl: string })
       alert("Gagal menyimpan konfigurasi Telegram.");
     }
     setIsSavingTg(false);
+  };
+  
+  const handleSaveIntegrations = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsSavingIntegration(true);
+    try {
+      const res = await fetch(`${backendUrl}/api/set_integrations`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ djka_webhook: djkaWebhook, mqtt_broker: mqttBroker })
+      });
+      if (res.ok) {
+        alert("Integrasi DJKA & Sistem Persinyalan IoT Berhasil Diterapkan!");
+      }
+    } catch (err) {
+      alert("Gagal menyimpan konfigurasi Integrasi.");
+    }
+    setIsSavingIntegration(false);
   };
 
   const handleSavePolygon = async (e: React.FormEvent) => {
@@ -119,51 +141,93 @@ export default function AdvancedSettings({ backendUrl }: { backendUrl: string })
         </form>
       </div>
 
-      {/* Telegram Bot Panel */}
-      <div className="bg-gray-900 border border-gray-800 p-6 rounded-xl shadow-lg">
-        <h3 className="text-xl font-bold text-white mb-2 flex items-center gap-2">
-          <Send className="w-6 h-6 text-blue-400" />
-          Notifikasi Telegram Bot
-        </h3>
-        <p className="text-gray-400 text-sm mb-6">
-          Masukkan Token Bot dan Chat ID untuk mengirimkan foto snapshot kejadian (kendaraan mogok / kereta lewat) secara real-time ke grup Telegram penjaga stasiun.
-        </p>
+      <div className="space-y-6">
+        {/* Integrasi DJKA & IoT */}
+        <div className="bg-gray-900 border border-gray-800 p-6 rounded-xl shadow-lg">
+          <h3 className="text-xl font-bold text-white mb-2 flex items-center gap-2">
+            <ServerCrash className="w-6 h-6 text-blue-400" />
+            Integrasi Server DJKA & Persinyalan
+          </h3>
+          <p className="text-gray-400 text-sm mb-6">
+            Konfigurasi koneksi ke server pusat DJKA (via HTTP Webhook) dan broker IoT MQTT untuk persinyalan perlintasan sirine.
+          </p>
 
-        <form onSubmit={handleSaveTelegram} className="space-y-4">
-          <div>
-            <label className="text-sm font-medium text-gray-300 block mb-2">Bot Token API</label>
-            <input 
-              type="password" required
-              value={telegramToken} onChange={(e) => setTelegramToken(e.target.value)}
-              placeholder="7xxxxxxxxx:AAHxxxxxxxxxxxxxxxxxxxxxxxxx"
-              className="w-full bg-gray-800 border border-gray-700 text-white rounded-lg px-4 py-2 focus:outline-none focus:border-blue-500"
-            />
-          </div>
-          <div>
-            <label className="text-sm font-medium text-gray-300 block mb-2">Chat ID (Grup/User)</label>
-            <input 
-              type="text" required
-              value={telegramChatId} onChange={(e) => setTelegramChatId(e.target.value)}
-              placeholder="-100xxxxxxxxxx"
-              className="w-full bg-gray-800 border border-gray-700 text-white rounded-lg px-4 py-2 focus:outline-none focus:border-blue-500"
-            />
-          </div>
+          <form onSubmit={handleSaveIntegrations} className="space-y-4">
+            <div>
+              <label className="text-sm font-medium text-gray-300 block mb-2">DJKA Webhook URL</label>
+              <input 
+                type="url" required
+                value={djkaWebhook} onChange={(e) => setDjkaWebhook(e.target.value)}
+                placeholder="https://httpbin.org/post"
+                className="w-full bg-gray-800 border border-gray-700 text-white rounded-lg px-4 py-2 focus:outline-none focus:border-blue-500"
+              />
+            </div>
+            <div>
+              <label className="text-sm font-medium text-gray-300 block mb-2">MQTT Broker (Host)</label>
+              <input 
+                type="text" required
+                value={mqttBroker} onChange={(e) => setMqttBroker(e.target.value)}
+                placeholder="test.mosquitto.org"
+                className="w-full bg-gray-800 border border-gray-700 text-white rounded-lg px-4 py-2 focus:outline-none focus:border-blue-500"
+              />
+            </div>
+            
+            <button 
+              type="submit" disabled={isSavingIntegration}
+              className="w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 rounded-lg transition flex items-center justify-center gap-2 mt-4 disabled:opacity-50"
+            >
+              <Save className="w-4 h-4" />
+              {isSavingIntegration ? 'Menghubungkan Ulang...' : 'Simpan & Reconnect'}
+            </button>
+          </form>
+        </div>
 
-          <div className="bg-blue-900/20 border border-blue-900/50 rounded-lg p-3 flex items-start gap-3 mt-4">
-            <ShieldAlert className="w-5 h-5 text-blue-400 shrink-0 mt-0.5" />
-            <p className="text-xs text-blue-300 leading-relaxed">
-              Token tidak disimpan secara permanen di database, melainkan di <i>memory state</i>. Jika server *Cold Start*, Anda perlu memasukkannya kembali.
-            </p>
-          </div>
-          
-          <button 
-            type="submit" disabled={isSavingTg}
-            className="w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 rounded-lg transition flex items-center justify-center gap-2 mt-4 disabled:opacity-50"
-          >
-            <Save className="w-4 h-4" />
-            {isSavingTg ? 'Menyimpan...' : 'Aktifkan Bot Telegram'}
-          </button>
-        </form>
+        {/* Telegram Bot Panel */}
+        <div className="bg-gray-900 border border-gray-800 p-6 rounded-xl shadow-lg">
+          <h3 className="text-xl font-bold text-white mb-2 flex items-center gap-2">
+            <Send className="w-6 h-6 text-blue-400" />
+            Notifikasi Telegram Bot
+          </h3>
+          <p className="text-gray-400 text-sm mb-6">
+            Masukkan Token Bot dan Chat ID untuk mengirimkan foto snapshot kejadian secara real-time ke grup Telegram.
+          </p>
+
+          <form onSubmit={handleSaveTelegram} className="space-y-4">
+            <div>
+              <label className="text-sm font-medium text-gray-300 block mb-2">Bot Token API</label>
+              <input 
+                type="password" required
+                value={telegramToken} onChange={(e) => setTelegramToken(e.target.value)}
+                placeholder="7xxxxxxxxx:AAHxxxxxxxxxxxxxxxxxxxxxxxxx"
+                className="w-full bg-gray-800 border border-gray-700 text-white rounded-lg px-4 py-2 focus:outline-none focus:border-blue-500"
+              />
+            </div>
+            <div>
+              <label className="text-sm font-medium text-gray-300 block mb-2">Chat ID (Grup/User)</label>
+              <input 
+                type="text" required
+                value={telegramChatId} onChange={(e) => setTelegramChatId(e.target.value)}
+                placeholder="-100xxxxxxxxxx"
+                className="w-full bg-gray-800 border border-gray-700 text-white rounded-lg px-4 py-2 focus:outline-none focus:border-blue-500"
+              />
+            </div>
+
+            <div className="bg-blue-900/20 border border-blue-900/50 rounded-lg p-3 flex items-start gap-3 mt-4">
+              <ShieldAlert className="w-5 h-5 text-blue-400 shrink-0 mt-0.5" />
+              <p className="text-xs text-blue-300 leading-relaxed">
+                Token tidak disimpan secara permanen di database, melainkan di <i>memory state</i>. Jika server *Cold Start*, Anda perlu memasukkannya kembali.
+              </p>
+            </div>
+            
+            <button 
+              type="submit" disabled={isSavingTg}
+              className="w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 rounded-lg transition flex items-center justify-center gap-2 mt-4 disabled:opacity-50"
+            >
+              <Save className="w-4 h-4" />
+              {isSavingTg ? 'Menyimpan...' : 'Aktifkan Bot Telegram'}
+            </button>
+          </form>
+        </div>
       </div>
     </div>
   );

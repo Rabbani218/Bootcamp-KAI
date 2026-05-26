@@ -80,6 +80,8 @@ class AppState:
         self.telegram_token: str = ""
         self.telegram_chat_id: str = ""
         self.polygon_points: List[Dict[str, float]] = [] # [{x, y}] format (0.0-1.0)
+        self.djka_webhook_url: str = os.getenv("DJKA_WEBHOOK_URL", "https://httpbin.org/post")
+        self.mqtt_broker: str = os.getenv("MQTT_BROKER", "test.mosquitto.org")
 
 app_state = AppState()
 
@@ -272,7 +274,7 @@ class AlertDispatcher:
     def __init__(self):
         self.mqtt_client = mqtt.Client(client_id="NusaRail_Dispatcher")
         try:
-            self.mqtt_client.connect(MQTT_BROKER, 1883, 60)
+            self.mqtt_client.connect(app_state.mqtt_broker, 1883, 60)
             self.mqtt_client.loop_start()
             log.info("MQTT Connected")
         except Exception as e:
@@ -318,7 +320,7 @@ class AlertDispatcher:
         # 2. Webhook DJKA
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.post(DJKA_WEBHOOK_URL, json=payload, timeout=5) as resp:
+                async with session.post(app_state.djka_webhook_url, json=payload, timeout=5) as resp:
                     pass
         except Exception as e:
             log.error(f"Gagal kirim Webhook: {e}")
@@ -777,6 +779,24 @@ class SetPolygonRequest(BaseModel):
 def set_polygon(req: SetPolygonRequest):
     app_state.polygon_points = [{"x": p.x, "y": p.y} for p in req.points]
     return {"status": "success", "points_count": len(app_state.polygon_points)}
+
+class SetIntegrationRequest(BaseModel):
+    djka_webhook: str
+    mqtt_broker: str
+
+@app.post("/api/set_integrations")
+def set_integrations(req: SetIntegrationRequest):
+    app_state.djka_webhook_url = req.djka_webhook
+    app_state.mqtt_broker = req.mqtt_broker
+    
+    # Reconnect MQTT
+    try:
+        alert_dispatcher.mqtt_client.disconnect()
+        alert_dispatcher.mqtt_client.connect(app_state.mqtt_broker, 1883, 60)
+    except Exception as e:
+        log.error(f"MQTT Reconnect Error: {e}")
+        
+    return {"status": "success"}
 
 @app.get("/api/incidents")
 def get_incidents():
