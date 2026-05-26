@@ -6,8 +6,9 @@ import os
 import time
 import math
 import shutil
+import queue
+import threading
 from pathlib import Path
-import sqlite3
 from typing import Dict, List, Optional
 
 import cv2
@@ -20,6 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+import sqlite3
 
 # Inisialisasi Database SQLite
 def init_db():
@@ -218,9 +220,9 @@ def postprocess(preds, orig_shape, ratio, pad):
         c_name = classes.get(int(c_id), 'unknown')
         if c_name == 'train' and conf > 0.6:
             mask.append(True)
-        elif c_name in ['car', 'motorcycle', 'bus', 'truck'] and conf > 0.5:
+        elif c_name in ['car', 'motorcycle', 'bus', 'truck'] and conf > 0.25:
             mask.append(True)
-        elif c_name == 'person' and conf > 0.5:
+        elif c_name == 'person' and conf > 0.25:
             mask.append(True)
         else:
             mask.append(False)
@@ -379,37 +381,81 @@ async def broadcast_gemini_report():
         if ws in app_state.clients:
             app_state.clients.remove(ws)
 
+# ── Producer-Consumer Architecture ────────────────────────────────────────────
+class VideoProducer(threading.Thread):
+    def __init__(self, target_url, mode):
+        super().__init__()
+        self.target_url = target_url
+        self.mode = mode
+        self.frame_queue = queue.Queue(maxsize=60)
+        self.running = True
+        self.cap = None
+        self.original_fps = 25.0
+        
+    def run(self):
+        self.cap = cv2.VideoCapture(self.target_url)
+        if self.cap.isOpened():
+            fps = self.cap.get(cv2.CAP_PROP_FPS)
+            if fps > 0 and not math.isnan(fps):
+                self.original_fps = fps
+            log.info(f"Producer started for {self.mode}. FPS: {self.original_fps}")
+        else:
+            log.error(f"Producer failed to open: {self.target_url}")
+            self.running = False
+            return
+            
+        failed_reads = 0
+        while self.running:
+            ret, frame = self.cap.read()
+            if not ret:
+                failed_reads += 1
+                if self.mode == "upload":
+                    self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    failed_reads = 0
+                    continue
+                if failed_reads > 10:
+                    break
+                time.sleep(0.1)
+                continue
+                
+            failed_reads = 0
+            try:
+                self.frame_queue.put(frame, timeout=1.0)
+            except queue.Full:
+                pass
+                
+        if self.cap:
+            self.cap.release()
+            
+    def stop(self):
+        self.running = False
+        self.join(timeout=2.0)
+
 async def yolo_inference_loop():
-    log.info("YOLO Inference Loop started")
+    log.info("YOLO Inference Loop started (Consumer Mode)")
     app_state.yolo_session = load_yolo_onnx()
     
-    cap = None
-    failed_reads = 0
     current_mode = None
     current_target = None
+    producer = None
     
     trackers = {}
     next_id = 1
     
-    # Variabel untuk sinkronisasi video lokal & Frame Skipping
     frame_counter = 0
-    original_fps = 25.0
-    frame_delay = 1.0 / 25.0
     
     app_state.running = True
     
     while app_state.running:
-        start_time_loop = time.time()
         
         if app_state.source_mode != current_mode or app_state.target_url != current_target:
-            if cap is not None:
-                cap.release()
-                cap = None
+            if producer is not None:
+                producer.stop()
+                producer = None
+            
             current_mode = app_state.source_mode
             current_target = app_state.target_url
-            failed_reads = 0
             
-        if cap is None:
             if current_mode == "youtube":
                 cookie_path = os.path.join(os.path.dirname(__file__), 'cookies.txt')
                 if not os.path.exists(cookie_path):
@@ -437,52 +483,40 @@ async def yolo_inference_loop():
                         app_state.last_frame = err_frame
                     await asyncio.sleep(5)
                     continue
-                cap = cv2.VideoCapture(url_result)
+                
+                producer = VideoProducer(url_result, current_mode)
+                producer.start()
             
             elif current_mode == "rtsp":
                 init_frame = generate_text_frame("INITIALIZING RTSP CCTV...", bg_color=(150, 100, 0))
                 async with app_state.frame_lock:
                     app_state.last_frame = init_frame
-                log.info(f"Connecting to RTSP: {current_target}")
-                cap = cv2.VideoCapture(current_target)
+                producer = VideoProducer(current_target, current_mode)
+                producer.start()
                 
             elif current_mode == "upload":
                 init_frame = generate_text_frame("INITIALIZING LOCAL VIDEO UPLOAD...", bg_color=(0, 100, 150))
                 async with app_state.frame_lock:
                     app_state.last_frame = init_frame
-                cap = cv2.VideoCapture(current_target)
+                producer = VideoProducer(current_target, current_mode)
+                producer.start()
                 
-                # --- [1] Deteksi FPS Asli Video ---
-                # Mengambil nilai FPS asli dari metadata file MP4
-                original_fps = cap.get(cv2.CAP_PROP_FPS)
-                if original_fps <= 0 or math.isnan(original_fps):
-                    original_fps = 25.0 # Default jika metadata rusak
-                frame_delay = 1.0 / original_fps
-                frame_counter = 0
-                log.info(f"Video lokal dimuat. FPS asli: {original_fps}, Frame delay: {frame_delay:.4f} detik")
-                
-            failed_reads = 0
+            frame_counter = 0
 
-        ret, frame = cap.read()
-        if not ret:
-            failed_reads += 1
-            if current_mode == "upload":
-                log.info("Video lokal selesai diputar. Looping kembali.")
-                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                continue
-                
-            if failed_reads >= 10:
-                log.warning("Stream putus atau gagal membaca video 10x beruntun.")
-                err_frame = generate_text_frame("STREAM LOST.\nFailed to read 10 frames.", bg_color=(0, 0, 200))
-                async with app_state.frame_lock:
-                    app_state.last_frame = err_frame
-                cap.release()
-                cap = None
-                await asyncio.sleep(5)
+        if producer is None or not producer.is_alive():
+            err_frame = generate_text_frame("STREAM LOST OR CONNECTING...", bg_color=(0, 0, 200))
+            async with app_state.frame_lock:
+                app_state.last_frame = err_frame
+            await asyncio.sleep(1)
             continue
             
-        failed_reads = 0
-        current_time = time.time()
+        try:
+            frame = producer.frame_queue.get_nowait()
+        except queue.Empty:
+            await asyncio.sleep(0.01)
+            continue
+            
+        start_time_loop = time.time()
         frame_counter += 1
         H, W = frame.shape[:2]
         
@@ -495,8 +529,6 @@ async def yolo_inference_loop():
         
         try:
             # --- [2] Implementasi Algoritma AI Frame Skipping ---
-            # DILARANG keras menjalankan inferensi YOLO di setiap frame untuk menghindari bottleneck CPU.
-            # Jalankan inferensi YOLO hanya setiap 5 frame (sekitar 5 FPS jika video asli 25 FPS).
             if frame_counter % 5 == 0 or len(app_state.last_detections) == 0:
                 yolo_frame = enhance_low_light(frame)
                 
@@ -513,7 +545,7 @@ async def yolo_inference_loop():
                     
                 app_state.last_detections = detections
             else:
-                # Frame antara: gunakan ulang hasil deteksi sebelumnya dari memori (Bounding Box Cache)
+                # Gunakan cache detections
                 detections = app_state.last_detections
                 
             # --- Object Tracking & Stationary Logic ---
@@ -541,21 +573,22 @@ async def yolo_inference_loop():
                 is_mogok = False
                 if matched_id is not None:
                     tdata = trackers[matched_id]
-                    # Check if stationary long enough
-                    if current_time - tdata['first_seen'] > STATIONARY_TIME_THRESHOLD:
+                    if start_time_loop - tdata['first_seen'] > STATIONARY_TIME_THRESHOLD:
                         is_mogok = True
                     new_trackers[matched_id] = {
                         "centroid": (cx, cy),
                         "first_seen": tdata['first_seen'],
-                        "last_seen": current_time,
-                        "mogok": is_mogok
+                        "last_seen": start_time_loop,
+                        "mogok": is_mogok,
+                        "last_alert_time": tdata.get('last_alert_time', 0)
                     }
                 else:
                     new_trackers[next_id] = {
                         "centroid": (cx, cy),
-                        "first_seen": current_time,
-                        "last_seen": current_time,
-                        "mogok": False
+                        "first_seen": start_time_loop,
+                        "last_seen": start_time_loop,
+                        "mogok": False,
+                        "last_alert_time": 0
                     }
                     matched_id = next_id
                     next_id += 1
@@ -575,24 +608,19 @@ async def yolo_inference_loop():
                         yolo_is_danger = True
                     elif is_mogok:
                         yolo_is_danger = True
-                        # Dispatch Alert jika mogok > threshold
-                        if current_time - tdata.get('last_alert_time', 0) > 30: # Cooldown 30 detik
+                        if start_time_loop - new_trackers[matched_id]['last_alert_time'] > 30:
                             asyncio.create_task(alert_dispatcher.dispatch_alert(
                                 lokasi=app_state.gemini_report.get("lokasi", "Unknown"),
                                 bahaya=True,
                                 frame=frame,
                                 jenis=f"Mogok ({det['cls']})"
                             ))
-                            tdata['last_alert_time'] = current_time
+                            new_trackers[matched_id]['last_alert_time'] = start_time_loop
 
             trackers = new_trackers
             app_state.yolo_danger = yolo_is_danger
-            app_state.last_detections = detections
             app_state.active_objects_count = len(trackers)
             
-            # Cleanup memori
-            import gc
-            gc.collect()
         except Exception as e:
             log.error(f"Error inferensi: {e}")
 
@@ -601,7 +629,6 @@ async def yolo_inference_loop():
         
         if len(polygon_abs) >= 3:
             cv2.polylines(display_frame, [polygon_abs], True, (0, 0, 255), 2)
-            # Isi polygon transparan
             overlay = display_frame.copy()
             cv2.fillPoly(overlay, [polygon_abs], (0, 0, 255))
             cv2.addWeighted(overlay, 0.15, display_frame, 0.85, 0, display_frame)
@@ -619,12 +646,12 @@ async def yolo_inference_loop():
             x1, y1, x2, y2 = det['xyxy']
             is_mogok = det.get('mogok', False)
             
-            color = (0, 255, 0) # Normal (Aman)
+            color = (0, 255, 0)
             if det['cls'] == 'train':
-                color = (0, 0, 255) # Merah
+                color = (0, 0, 255)
                 label = f"KERETA API {det['conf']:.2f}"
             elif is_mogok:
-                color = (0, 0, 255) # Merah Bahaya
+                color = (0, 0, 255)
                 label = f"MOGOK {det['cls']} {det['conf']:.2f}"
             else:
                 label = f"{det['cls']} {det['conf']:.2f}"
@@ -636,21 +663,20 @@ async def yolo_inference_loop():
             app_state.last_frame = display_frame
             
         # --- [3] Sinkronisasi Waktu Eksekusi (Time Sync) ---
-        # Memaksa laju perputaran video lokal agar tidak mendahului kecepatan FPS aslinya
         elapsed_time = time.time() - start_time_loop
+        frame_delay = 1.0 / producer.original_fps
+        
         if current_mode == "upload":
-            if elapsed_time < frame_delay:
-                # Menunggu sisa waktu yang dibutuhkan untuk mencapai target frame_delay asli
-                await asyncio.sleep(frame_delay - elapsed_time)
+            sleep_time = frame_delay - elapsed_time
+            if sleep_time > 0:
+                await asyncio.sleep(sleep_time)
             else:
-                # Jika pemrosesan terlalu lambat, biarkan yield lanjut (0 delay agar segera catch-up)
                 await asyncio.sleep(0.001)
         else:
             await asyncio.sleep(0.001)
 
-    # Memastikan cap ditutup dan memori dibersihkan saat loop berakhir
-    if cap is not None:
-        cap.release()
+    if producer is not None:
+        producer.stop()
 
 async def gemini_analysis_loop():
     log.info("Gemini Analysis Loop started")
