@@ -7,7 +7,10 @@ const VideoStream = dynamic(() => import('@/components/VideoStream'), { ssr: fal
 const GeminiOverlay = dynamic(() => import('@/components/GeminiOverlay'), { ssr: false });
 
 export default function Home() {
-  const backendUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+  let backendUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+  if (backendUrl.includes('hf.space') && backendUrl.startsWith('http://')) {
+    backendUrl = backendUrl.replace('http://', 'https://');
+  }
   const backendWsUrl = backendUrl.replace('http', 'ws') + '/api/ws/gemini';
   
   const [targetUrl, setTargetUrl] = useState("https://www.youtube.com/watch?v=q7lvnYVuqNY");
