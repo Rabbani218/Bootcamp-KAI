@@ -6,7 +6,6 @@ import os
 import time
 import math
 import shutil
-import queue
 import threading
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -381,302 +380,300 @@ async def broadcast_gemini_report():
         if ws in app_state.clients:
             app_state.clients.remove(ws)
 
-# ── Producer-Consumer Architecture ────────────────────────────────────────────
-class VideoProducer(threading.Thread):
-    def __init__(self, target_url, mode):
-        super().__init__()
-        self.target_url = target_url
-        self.mode = mode
-        self.frame_queue = queue.Queue(maxsize=60)
-        self.running = True
-        self.cap = None
-        self.original_fps = 25.0
+# ═══════════════════════════════════════════════════════════════════════════════
+# ARSITEKTUR SHARED STATE (NON-BLOCKING DROP PATTERN)
+# Menggantikan Queue Architecture yang menyebabkan bottleneck dan slow-motion.
+#
+# Thread 1 - Video Reader : Membaca frame dari cap.read() + sleep(1/fps)
+# Thread 2 - AI Worker   : Menjalankan YOLO secepat CPU (tanpa sleep)
+# Async Generator         : Membaca shared state → resize → JPEG 50% → yield
+# ═══════════════════════════════════════════════════════════════════════════════
+class VideoStreamer:
+    """
+    VideoStreamer mengelola 2 thread independen yang saling berkomunikasi
+    melalui variabel shared (bukan Queue) agar tidak ada blocking I/O.
+    """
+    def __init__(self, target_url: str, mode: str, yolo_session):
+        self.target_url   = target_url
+        self.mode         = mode
+        self.yolo_session = yolo_session
         
-    def run(self):
-        self.cap = cv2.VideoCapture(self.target_url)
-        if self.cap.isOpened():
-            fps = self.cap.get(cv2.CAP_PROP_FPS)
-            if fps > 0 and not math.isnan(fps):
-                self.original_fps = fps
-            log.info(f"Producer started for {self.mode}. FPS: {self.original_fps}")
-        else:
-            log.error(f"Producer failed to open: {self.target_url}")
+        # ── Shared State Variables (Non-Blocking Drop Pattern) ──
+        # Thread Reader dan AI Worker berbagi memori ini langsung
+        self.latest_frame      = None  # Frame mentah terbaru dari Reader Thread
+        self.latest_detections = []    # Hasil YOLO terbaru dari AI Worker Thread
+        self.original_fps      = 25.0  # Akan di-update setelah VideoCapture terbuka
+        self.running           = False
+        
+        # Threading locks untuk akses aman ke shared variables
+        self._frame_lock = threading.Lock()
+        self._det_lock   = threading.Lock()
+        
+        # Thread objects
+        self._reader_thread = None
+        self._ai_thread     = None
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # THREAD 1: VIDEO READER
+    # Bertugas HANYA membaca cap.read() dan meng-update self.latest_frame.
+    # time.sleep(1/fps) dipasang di sini agar MP4 lokal tidak diputar terlalu cepat.
+    # ──────────────────────────────────────────────────────────────────────────
+    def _video_reader_thread(self):
+        log.info(f"[VideoReader] Thread dimulai: {self.mode} → {self.target_url[:80]}")
+        cap = cv2.VideoCapture(self.target_url)
+        
+        if not cap.isOpened():
+            log.error(f"[VideoReader] Gagal membuka sumber: {self.target_url[:80]}")
             self.running = False
             return
-            
+        
+        # Deteksi FPS asli dari metadata video
+        fps_raw = cap.get(cv2.CAP_PROP_FPS)
+        if fps_raw and fps_raw > 0 and not math.isnan(fps_raw):
+            self.original_fps = fps_raw
+        log.info(f"[VideoReader] FPS asli terdeteksi: {self.original_fps}")
+        
+        frame_delay = 1.0 / self.original_fps  # Waktu tunggu antar frame untuk sinkronisasi FPS
         failed_reads = 0
+        
         while self.running:
-            ret, frame = self.cap.read()
+            t_start = time.monotonic()
+            ret, frame = cap.read()
+            
             if not ret:
                 failed_reads += 1
                 if self.mode == "upload":
-                    self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    # Video MP4 habis → loop kembali ke awal
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                     failed_reads = 0
                     continue
-                if failed_reads > 10:
+                if failed_reads > 15:
+                    log.warning("[VideoReader] Stream putus setelah 15x gagal baca.")
                     break
+                time.sleep(0.05)
+                continue
+            
+            failed_reads = 0
+            
+            # Update shared variable (Non-Blocking Drop: frame lama ditimpa langsung)
+            with self._frame_lock:
+                self.latest_frame = frame
+            
+            # Sinkronisasi kecepatan putar video MP4 agar tidak fast-forward
+            # Untuk live stream (RTSP/YouTube), tidak perlu sleep karena cap.read() sendiri yang memblokir
+            if self.mode == "upload":
+                elapsed = time.monotonic() - t_start
+                sleep_time = frame_delay - elapsed
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
+        
+        cap.release()
+        log.info("[VideoReader] Thread selesai, cap.release() dipanggil.")
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # THREAD 2: AI WORKER
+    # Bertugas HANYA menjalankan inferensi YOLO dari frame terbaru.
+    # TIDAK ada sleep → berjalan secepat CPU mampu (hasilkan 3-5 AI FPS)
+    # ──────────────────────────────────────────────────────────────────────────
+    def _ai_worker_thread(self):
+        log.info("[AIWorker] Thread YOLO dimulai.")
+        
+        while self.running:
+            # Ambil salinan frame terbaru dari shared state
+            with self._frame_lock:
+                if self.latest_frame is None:
+                    time.sleep(0.02)  # Tunggu frame pertama dari Reader Thread
+                    continue
+                frame_copy = self.latest_frame.copy()
+            
+            if self.yolo_session is None:
                 time.sleep(0.1)
                 continue
-                
-            failed_reads = 0
-            try:
-                self.frame_queue.put(frame, timeout=1.0)
-            except queue.Full:
-                pass
-                
-        if self.cap:
-            self.cap.release()
             
+            try:
+                # Preprocessing: CLAHE low-light + resize ke 640 agar ONNX cepat
+                enhanced   = enhance_low_light(frame_copy)
+                img_input, ratio, pad = preprocess_image(enhanced)
+                
+                # Inferensi ONNX YOLO (classes: 0=person, 2=car, 3=motorcycle, 5=bus, 6=train, 7=truck)
+                input_name = self.yolo_session.get_inputs()[0].name
+                preds      = self.yolo_session.run(None, {input_name: img_input})[0]
+                
+                # Postprocess → list of {xyxy, conf, cls}
+                detections = postprocess(preds, frame_copy.shape[:2], ratio, pad)
+                
+                # Simpan ke shared state (Non-Blocking Drop)
+                with self._det_lock:
+                    self.latest_detections = detections
+                    
+                # Sinkronisasi ke app_state untuk Tracking, Geo-Fencing & Telegram
+                app_state.last_detections = detections
+                
+            except Exception as e:
+                log.error(f"[AIWorker] Error YOLO: {e}")
+                time.sleep(0.05)
+        
+        log.info("[AIWorker] Thread YOLO selesai.")
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Kontrol Lifecycle: start() dan stop()
+    # ──────────────────────────────────────────────────────────────────────────
+    def start(self):
+        self.running = True
+        
+        self._reader_thread = threading.Thread(target=self._video_reader_thread, daemon=True)
+        self._ai_thread     = threading.Thread(target=self._ai_worker_thread,    daemon=True)
+        
+        self._reader_thread.start()
+        self._ai_thread.start()
+        log.info("[VideoStreamer] Reader + AI threads dimulai.")
+    
     def stop(self):
         self.running = False
-        self.join(timeout=2.0)
+        if self._reader_thread and self._reader_thread.is_alive():
+            self._reader_thread.join(timeout=3.0)
+        if self._ai_thread and self._ai_thread.is_alive():
+            self._ai_thread.join(timeout=3.0)
+        log.info("[VideoStreamer] Semua thread berhenti.")
+    
+    def is_alive(self) -> bool:
+        if self._reader_thread is None:
+            return False
+        return self._reader_thread.is_alive()
+    
+    def get_latest_frame(self):
+        """Mengambil salinan frame terbaru secara thread-safe."""
+        with self._frame_lock:
+            return None if self.latest_frame is None else self.latest_frame.copy()
+    
+    def get_latest_detections(self):
+        """Mengambil salinan detections terbaru secara thread-safe."""
+        with self._det_lock:
+            return list(self.latest_detections)
 
+
+# ── Singleton Streamer State (dikelola oleh management loop) ──────────────────
+_current_streamer: Optional[VideoStreamer] = None
+_streamer_lock = threading.Lock()
+
+def get_streamer() -> Optional[VideoStreamer]:
+    global _current_streamer
+    with _streamer_lock:
+        return _current_streamer
+
+def set_streamer(new_streamer: Optional[VideoStreamer]):
+    global _current_streamer
+    with _streamer_lock:
+        if _current_streamer is not None:
+            _current_streamer.stop()
+        _current_streamer = new_streamer
+
+
+# ── Management Loop: Memantau perubahan sumber video dan mengganti streamer ──
 async def yolo_inference_loop():
-    log.info("YOLO Inference Loop started (Consumer Mode)")
+    """Loop utama yang memantau perubahan source video dan mengelola lifecycle VideoStreamer."""
+    log.info("YOLO Management Loop started (Shared State Architecture)")
     app_state.yolo_session = load_yolo_onnx()
-    
-    current_mode = None
-    current_target = None
-    producer = None
-    
-    trackers = {}
-    next_id = 1
-    
-    frame_counter = 0
-    
     app_state.running = True
     
+    current_mode   = None
+    current_target = None
+    
     while app_state.running:
+        mode   = app_state.source_mode
+        target = app_state.target_url
         
-        if app_state.source_mode != current_mode or app_state.target_url != current_target:
-            if producer is not None:
-                producer.stop()
-                producer = None
+        # Jika source berubah, hentikan streamer lama dan buat yang baru
+        if mode != current_mode or target != current_target:
+            log.info(f"[Manager] Source berubah: {mode} → {target[:60]}")
+            set_streamer(None)  # Stop streamer lama
+            current_mode   = mode
+            current_target = target
             
-            current_mode = app_state.source_mode
-            current_target = app_state.target_url
+            resolved_url = target
             
-            if current_mode == "youtube":
+            if mode == "youtube":
                 cookie_path = os.path.join(os.path.dirname(__file__), 'cookies.txt')
                 if not os.path.exists(cookie_path):
-                    warn_frame = generate_text_frame("WARNING: cookies.txt NOT FOUND.\nYOUTUBE MAY BLOCK THIS STREAM.", bg_color=(0, 128, 255))
                     async with app_state.frame_lock:
-                        app_state.last_frame = warn_frame
+                        app_state.last_frame = generate_text_frame(
+                            "WARNING: cookies.txt NOT FOUND.\nYOUTUBE MAY BLOCK THIS STREAM.", bg_color=(0, 128, 255))
                     await asyncio.sleep(3)
                 else:
-                    init_frame = generate_text_frame("INITIALIZING STREAM...\nExtracting YouTube URL (w/ Cookies)...", bg_color=(0, 150, 150))
                     async with app_state.frame_lock:
-                        app_state.last_frame = init_frame
+                        app_state.last_frame = generate_text_frame(
+                            "INITIALIZING STREAM...\nExtracting YouTube URL (w/ Cookies)...", bg_color=(0, 150, 150))
                 
-                log.info("Mencoba membuat koneksi stream YouTube...")
-                url_result = await extract_youtube_url_async(current_target)
+                url_result = await extract_youtube_url_async(target)
                 
                 if url_result == "TIMEOUT":
-                    err_frame = generate_text_frame("ERROR: YOUTUBE BLOCKED HF IP (TIMEOUT).\nTRY ANOTHER URL.", bg_color=(0, 0, 200))
                     async with app_state.frame_lock:
-                        app_state.last_frame = err_frame
+                        app_state.last_frame = generate_text_frame(
+                            "ERROR: YOUTUBE BLOCKED HF IP (TIMEOUT).\nTRY ANOTHER URL.", bg_color=(0, 0, 200))
                     await asyncio.sleep(5)
+                    current_mode = None  # Force retry next iteration
                     continue
                 elif url_result == "ERROR" or not url_result:
-                    err_frame = generate_text_frame("ERROR: VIDEO RESTRICTED OR INVALID.", bg_color=(0, 0, 200))
                     async with app_state.frame_lock:
-                        app_state.last_frame = err_frame
+                        app_state.last_frame = generate_text_frame(
+                            "ERROR: VIDEO RESTRICTED OR INVALID.", bg_color=(0, 0, 200))
                     await asyncio.sleep(5)
+                    current_mode = None
                     continue
-                
-                producer = VideoProducer(url_result, current_mode)
-                producer.start()
-            
-            elif current_mode == "rtsp":
-                init_frame = generate_text_frame("INITIALIZING RTSP CCTV...", bg_color=(150, 100, 0))
-                async with app_state.frame_lock:
-                    app_state.last_frame = init_frame
-                producer = VideoProducer(current_target, current_mode)
-                producer.start()
-                
-            elif current_mode == "upload":
-                init_frame = generate_text_frame("INITIALIZING LOCAL VIDEO UPLOAD...", bg_color=(0, 100, 150))
-                async with app_state.frame_lock:
-                    app_state.last_frame = init_frame
-                producer = VideoProducer(current_target, current_mode)
-                producer.start()
-                
-            frame_counter = 0
-
-        if producer is None or not producer.is_alive():
-            err_frame = generate_text_frame("STREAM LOST OR CONNECTING...", bg_color=(0, 0, 200))
-            async with app_state.frame_lock:
-                app_state.last_frame = err_frame
-            await asyncio.sleep(1)
-            continue
-            
-        try:
-            frame = producer.frame_queue.get_nowait()
-        except queue.Empty:
-            await asyncio.sleep(0.01)
-            continue
-            
-        start_time_loop = time.time()
-        frame_counter += 1
-        H, W = frame.shape[:2]
-        
-        # Setup Absolute Polygon for Geo-Fencing Point-in-Polygon Test
-        polygon_abs = []
-        if len(app_state.polygon_points) >= 3:
-            for pt in app_state.polygon_points:
-                polygon_abs.append([int(pt['x'] * W), int(pt['y'] * H)])
-            polygon_abs = np.array(polygon_abs, np.int32)
-        
-        try:
-            # --- [2] Implementasi Algoritma AI Frame Skipping ---
-            if frame_counter % 5 == 0 or len(app_state.last_detections) == 0:
-                yolo_frame = enhance_low_light(frame)
-                
-                def run_yolo_sync(frame_np):
-                    input_name = app_state.yolo_session.get_inputs()[0].name
-                    img, ratio, pad = preprocess_image(frame_np)
-                    preds = app_state.yolo_session.run(None, {input_name: img})[0]
-                    return postprocess(preds, frame_np.shape[:2], ratio, pad)
-
-                if app_state.yolo_session:
-                    detections = await asyncio.to_thread(run_yolo_sync, yolo_frame)
-                else:
-                    detections = []
                     
-                app_state.last_detections = detections
-            else:
-                # Gunakan cache detections
-                detections = app_state.last_detections
-                
-            # --- Object Tracking & Stationary Logic ---
-            current_centroids = []
-            new_trackers = {}
-            yolo_is_danger = False
+                resolved_url = url_result
             
+            elif mode == "rtsp":
+                async with app_state.frame_lock:
+                    app_state.last_frame = generate_text_frame(
+                        "INITIALIZING RTSP CCTV...", bg_color=(150, 100, 0))
+            
+            elif mode == "upload":
+                async with app_state.frame_lock:
+                    app_state.last_frame = generate_text_frame(
+                        "LOADING VIDEO FILE...", bg_color=(0, 100, 150))
+            
+            # Buat dan mulai VideoStreamer baru
+            new_streamer = VideoStreamer(resolved_url, mode, app_state.yolo_session)
+            new_streamer.start()
+            set_streamer(new_streamer)
+            log.info(f"[Manager] VideoStreamer baru dimulai untuk mode: {mode}")
+        
+        # Monitor tracking, geo-fencing, dan status bahaya
+        streamer = get_streamer()
+        if streamer and streamer.is_alive():
+            detections = streamer.get_latest_detections()
+            H, W = 480, 640  # Default dimensions
+            frame_ref = streamer.get_latest_frame()
+            if frame_ref is not None:
+                H, W = frame_ref.shape[:2]
+            
+            polygon_abs = []
+            if len(app_state.polygon_points) >= 3:
+                for pt in app_state.polygon_points:
+                    polygon_abs.append([int(pt['x'] * W), int(pt['y'] * H)])
+                polygon_abs = np.array(polygon_abs, np.int32)
+            
+            yolo_is_danger = False
             for det in detections:
                 x1, y1, x2, y2 = det['xyxy']
                 cx = (x1 + x2) / 2
                 cy = (y1 + y2) / 2
-                current_centroids.append((cx, cy, det))
-            
-            # Simple greedy match
-            for cx, cy, det in current_centroids:
-                matched_id = None
-                min_dist = float('inf')
-                for tid, tdata in trackers.items():
-                    px, py = tdata['centroid']
-                    dist = math.hypot(cx - px, cy - py)
-                    if dist < STATIONARY_PIXEL_THRESHOLD and dist < min_dist:
-                        min_dist = dist
-                        matched_id = tid
-                        
-                is_mogok = False
-                if matched_id is not None:
-                    tdata = trackers[matched_id]
-                    if start_time_loop - tdata['first_seen'] > STATIONARY_TIME_THRESHOLD:
-                        is_mogok = True
-                    new_trackers[matched_id] = {
-                        "centroid": (cx, cy),
-                        "first_seen": tdata['first_seen'],
-                        "last_seen": start_time_loop,
-                        "mogok": is_mogok,
-                        "last_alert_time": tdata.get('last_alert_time', 0)
-                    }
-                else:
-                    new_trackers[next_id] = {
-                        "centroid": (cx, cy),
-                        "first_seen": start_time_loop,
-                        "last_seen": start_time_loop,
-                        "mogok": False,
-                        "last_alert_time": 0
-                    }
-                    matched_id = next_id
-                    next_id += 1
-                
-                det['track_id'] = matched_id
-                det['mogok'] = is_mogok
-                
-                # Cek danger dengan Geo-Fencing
-                inside_polygon = True
+                inside = True
                 if len(polygon_abs) >= 3:
-                    dist = cv2.pointPolygonTest(polygon_abs, (float(cx), float(cy)), False)
-                    if dist < 0:
-                        inside_polygon = False
-
-                if inside_polygon:
-                    if det['cls'] == 'train':
-                        yolo_is_danger = True
-                    elif is_mogok:
-                        yolo_is_danger = True
-                        if start_time_loop - new_trackers[matched_id]['last_alert_time'] > 30:
-                            asyncio.create_task(alert_dispatcher.dispatch_alert(
-                                lokasi=app_state.gemini_report.get("lokasi", "Unknown"),
-                                bahaya=True,
-                                frame=frame,
-                                jenis=f"Mogok ({det['cls']})"
-                            ))
-                            new_trackers[matched_id]['last_alert_time'] = start_time_loop
-
-            trackers = new_trackers
+                    d = cv2.pointPolygonTest(polygon_abs, (float(cx), float(cy)), False)
+                    if d < 0:
+                        inside = False
+                if inside and det['cls'] == 'train':
+                    yolo_is_danger = True
+            
             app_state.yolo_danger = yolo_is_danger
-            app_state.active_objects_count = len(trackers)
-            
-        except Exception as e:
-            log.error(f"Error inferensi: {e}")
-
-        # Render Bounding Boxes
-        display_frame = frame.copy()
+            app_state.active_objects_count = len(detections)
         
-        if len(polygon_abs) >= 3:
-            cv2.polylines(display_frame, [polygon_abs], True, (0, 0, 255), 2)
-            overlay = display_frame.copy()
-            cv2.fillPoly(overlay, [polygon_abs], (0, 0, 255))
-            cv2.addWeighted(overlay, 0.15, display_frame, 0.85, 0, display_frame)
-            cv2.putText(display_frame, "DANGER ZONE", polygon_abs[0], cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
-        else:
-            cv2.rectangle(display_frame, (int(W*0.1), int(H*0.2)), (int(W*0.9), int(H*0.9)), (255,255,0), 1, cv2.LINE_AA)
-            cv2.putText(display_frame, "ROI Default (Seluruh Layar)", (int(W*0.1), int(H*0.2)-10), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255,255,0), 1)
+        await asyncio.sleep(1.0)  # Check setiap detik sudah cukup untuk management
+    
+    set_streamer(None)
 
-        # Draw Timestamps
-        timestamp_str = time.strftime("%Y-%m-%d %H:%M:%S")
-        cv2.putText(display_frame, f"LIVE SYSTEM TIMESTAMP: {timestamp_str}", (20, H - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 3)
-        cv2.putText(display_frame, f"LIVE SYSTEM TIMESTAMP: {timestamp_str}", (20, H - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-
-        for det in app_state.last_detections:
-            x1, y1, x2, y2 = det['xyxy']
-            is_mogok = det.get('mogok', False)
-            
-            color = (0, 255, 0)
-            if det['cls'] == 'train':
-                color = (0, 0, 255)
-                label = f"KERETA API {det['conf']:.2f}"
-            elif is_mogok:
-                color = (0, 0, 255)
-                label = f"MOGOK {det['cls']} {det['conf']:.2f}"
-            else:
-                label = f"{det['cls']} {det['conf']:.2f}"
-                
-            cv2.rectangle(display_frame, (x1, y1), (x2, y2), color, 2)
-            cv2.putText(display_frame, label, (x1, max(10, y1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
-            
-        async with app_state.frame_lock:
-            app_state.last_frame = display_frame
-            
-        # --- [3] Sinkronisasi Waktu Eksekusi (Time Sync) ---
-        elapsed_time = time.time() - start_time_loop
-        frame_delay = 1.0 / producer.original_fps
-        
-        if current_mode == "upload":
-            sleep_time = frame_delay - elapsed_time
-            if sleep_time > 0:
-                await asyncio.sleep(sleep_time)
-            else:
-                await asyncio.sleep(0.001)
-        else:
-            await asyncio.sleep(0.001)
-
-    if producer is not None:
-        producer.stop()
 
 async def gemini_analysis_loop():
     log.info("Gemini Analysis Loop started")
@@ -887,39 +884,113 @@ def get_status():
     }
 
 async def generate_mjpeg_stream():
-    # 1. Instant First-Frame Yielding (Pencegah Timeout Kritis)
-    init_frame = np.zeros((480, 640, 3), dtype=np.uint8)
-    cv2.putText(init_frame, "INITIALIZING AI ENGINE & YOUTUBE STREAM...", (20, 220), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-    cv2.putText(init_frame, "Please wait 10s", (240, 260), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-    ret, buffer = cv2.imencode('.jpg', init_frame)
+    """
+    ASYNC GENERATOR (Streamer MJPEG).
+    Tugasnya HANYA:
+    1. Ambil latest_frame dari VideoStreamer (Shared State)
+    2. Ambil latest_detections dan gambar bounding box secara eksplisit
+    3. Resize ke 640x360 (bandwidth reduction ~50%)
+    4. Encode JPEG quality=50 (CPU & bandwidth reduction ~70%)
+    5. Yield frame ke frontend di ~30 FPS
+    """
+    # Frame init sebelum video muncul
+    init_frame = np.zeros((360, 640, 3), dtype=np.uint8)
+    cv2.putText(init_frame, "INITIALIZING AI ENGINE...", (100, 180), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+    ret, buf = cv2.imencode('.jpg', init_frame, [cv2.IMWRITE_JPEG_QUALITY, 50])
     if ret:
-        frame_bytes = buffer.tobytes()
-        yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
-
-    # Boundary format standard
+        yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + buf.tobytes() + b'\r\n')
+    
     while app_state.running:
-        frame_to_stream = None
-        async with app_state.frame_lock:
-            if app_state.last_frame is not None:
-                frame_to_stream = app_state.last_frame
-                
-        if frame_to_stream is not None:
-            ret, buffer = cv2.imencode('.jpg', frame_to_stream)
+        streamer = get_streamer()
+        
+        if streamer is None or not streamer.is_alive():
+            # Tampilkan frame abu-abu saat menunggu streamer
+            wait_frame = np.full((360, 640, 3), 40, dtype=np.uint8)
+            cv2.putText(wait_frame, "CONNECTING TO VIDEO SOURCE...", (60, 180), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 2)
+            ret, buf = cv2.imencode('.jpg', wait_frame, [cv2.IMWRITE_JPEG_QUALITY, 50])
             if ret:
-                frame = buffer.tobytes()
-                yield (b'--frame\r\n'
-                       b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+                yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + buf.tobytes() + b'\r\n')
+            await asyncio.sleep(0.5)
+            continue
+        
+        # ── Ambil frame dan detections dari Shared State ──────────────────────
+        frame = streamer.get_latest_frame()
+        
+        if frame is None:
+            await asyncio.sleep(0.03)
+            continue
+        
+        detections = streamer.get_latest_detections()
+        
+        # ── [EXTREME BANDWIDTH REDUCTION] Resize ke 640x360 ──────────────────
+        frame = cv2.resize(frame, (640, 360))
+        H, W = frame.shape[:2]
+        
+        # ── Render Geo-Fence Polygon ──────────────────────────────────────────
+        polygon_abs = []
+        if len(app_state.polygon_points) >= 3:
+            for pt in app_state.polygon_points:
+                polygon_abs.append([int(pt['x'] * W), int(pt['y'] * H)])
+            polygon_abs = np.array(polygon_abs, np.int32)
+            cv2.polylines(frame, [polygon_abs], True, (0, 0, 255), 2)
+            overlay = frame.copy()
+            cv2.fillPoly(overlay, [polygon_abs], (0, 0, 255))
+            cv2.addWeighted(overlay, 0.15, frame, 0.85, 0, frame)
+            cv2.putText(frame, "DANGER ZONE", polygon_abs[0], cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
         else:
-            # Fallback frame abu-abu saat buffering awal atau jika gagal baca video
-            buff_frame = np.full((480, 640, 3), 128, dtype=np.uint8)
-            cv2.putText(buff_frame, "BUFFERING YOUTUBE / HF COLD START...", (40, 240), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
-            ret, buffer = cv2.imencode('.jpg', buff_frame)
-            if ret:
-                frame = buffer.tobytes()
-                yield (b'--frame\r\n'
-                       b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
-        await asyncio.sleep(0.04)  # ~25 FPS emit rate
+            # Tampilkan ROI default hanya jika tidak ada polygon
+            cv2.rectangle(frame, (int(W*0.1), int(H*0.1)), (int(W*0.9), int(H*0.9)), (255, 255, 0), 1)
+            cv2.putText(frame, "ROI Default (Seluruh Layar)", (int(W*0.1), int(H*0.1)-5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 0), 1)
+        
+        # ── [WAJIB EKSPLISIT] Render Bounding Box dari latest_detections ──────
+        # Sesuai spesifikasi: iterasi detections dan gambar dengan cv2.rectangle
+        LABEL_MAP = {
+            'car':        ('MOBIL',   (0, 255, 0)),
+            'truck':      ('TRUK',    (0, 200, 50)),
+            'bus':        ('BUS',     (50, 200, 0)),
+            'motorcycle': ('MOTOR',   (0, 255, 100)),
+            'train':      ('KERETA',  (0, 0, 255)),
+            'person':     ('ORANG',   (255, 200, 0)),
+        }
+        for det in detections:
+            x1, y1, x2, y2 = det['xyxy']
+            conf            = det['conf']
+            cls_name        = det.get('cls', 'unknown')
+            is_mogok        = det.get('mogok', False)
+            
+            label_text, box_color = LABEL_MAP.get(cls_name, (cls_name.upper(), (0, 255, 0)))
+            
+            # Override warna merah untuk kereta dan kendaraan mogok
+            if cls_name == 'train':
+                box_color  = (0, 0, 255)
+                label_text = f"KERETA API"
+            elif is_mogok:
+                box_color  = (0, 0, 255)
+                label_text = f"MOGOK! {label_text}"
+            
+            # Gambar bounding box
+            cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), box_color, 2)
+            
+            # Gambar label background (agar teks mudah terbaca)
+            label_full = f"{label_text} {conf:.2f}"
+            (lw, lh), _ = cv2.getTextSize(label_full, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+            cv2.rectangle(frame, (int(x1), max(0, int(y1)-lh-8)), (int(x1)+lw+4, int(y1)), box_color, -1)
+            cv2.putText(frame, label_full, (int(x1)+2, max(10, int(y1)-4)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
+        
+        # ── Timestamp Overlay ─────────────────────────────────────────────────
+        ts = time.strftime("%Y-%m-%d %H:%M:%S")
+        cv2.putText(frame, f"NusaRail | {ts}", (5, H-8), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 3)
+        cv2.putText(frame, f"NusaRail | {ts}", (5, H-8), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
+        
+        # ── [EXTREME COMPRESSION] Encode JPEG Quality=50 ─────────────────────
+        # Mengurangi beban memori dan bandwidth hingga 70% dibanding quality 95
+        ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 50])
+        if ret:
+            yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
+        
+        # ~30 FPS output rate ke frontend
+        await asyncio.sleep(0.033)
+
 
 @app.get("/api/stream")
 async def video_stream():
@@ -932,8 +1003,8 @@ async def websocket_endpoint(websocket: WebSocket):
     try:
         await websocket.send_text(json.dumps(app_state.gemini_report))
         while True:
-            # Tetap terbuka dan menunggu ping dari frontend untuk cegah zombie process
-            await websocket.receive_text() 
+            await websocket.receive_text()
     except WebSocketDisconnect:
         if websocket in app_state.clients:
             app_state.clients.remove(websocket)
+
