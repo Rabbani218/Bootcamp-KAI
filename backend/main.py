@@ -82,6 +82,9 @@ class AppState:
         self.polygon_points: List[Dict[str, float]] = [] # [{x, y}] format (0.0-1.0)
         self.djka_webhook_url: str = os.getenv("DJKA_WEBHOOK_URL", "https://httpbin.org/post")
         self.mqtt_broker: str = os.getenv("MQTT_BROKER", "test.mosquitto.org")
+        
+        self.start_time: float = time.time()
+        self.active_objects_count: int = 0
 
 app_state = AppState()
 
@@ -564,6 +567,7 @@ async def yolo_inference_loop():
             trackers = new_trackers
             app_state.yolo_danger = yolo_is_danger
             app_state.last_detections = detections
+            app_state.active_objects_count = len(trackers)
             
             # Cleanup memori
             import gc
@@ -810,6 +814,15 @@ def get_incidents():
         return [dict(r) for r in rows]
     except Exception as e:
         return {"error": str(e)}
+
+@app.get("/api/status")
+def get_status():
+    uptime_seconds = int(time.time() - app_state.start_time)
+    return {
+        "danger": app_state.yolo_danger,
+        "uptime": uptime_seconds,
+        "active_objects": app_state.active_objects_count
+    }
 
 async def generate_mjpeg_stream():
     # 1. Instant First-Frame Yielding (Pencegah Timeout Kritis)

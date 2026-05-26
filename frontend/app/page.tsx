@@ -25,20 +25,33 @@ export default function Home() {
   const [uploadProgress, setUploadProgress] = useState(0);
   const [isUpdating, setIsUpdating] = useState(false);
   const [healthInfo, setHealthInfo] = useState({ djka_connected: false, mqtt_connected: false });
+  const [isDanger, setIsDanger] = useState(false);
 
   useEffect(() => {
-    const fetchHealth = async () => {
+    const fetchHealthAndStatus = async () => {
       try {
-        const res = await fetch(`${backendUrl}/api/health`);
-        const data = await res.json();
-        setHealthInfo({
-          djka_connected: data.djka_connected || false,
-          mqtt_connected: data.mqtt_connected || false
-        });
+        const [healthRes, statusRes] = await Promise.all([
+          fetch(`${backendUrl}/api/health`).catch(() => null),
+          fetch(`${backendUrl}/api/status`).catch(() => null)
+        ]);
+
+        if (healthRes) {
+          const healthData = await healthRes.json();
+          setHealthInfo({
+            djka_connected: healthData.djka_connected || false,
+            mqtt_connected: healthData.mqtt_connected || false
+          });
+        }
+
+        if (statusRes) {
+          const statusData = await statusRes.json();
+          setIsDanger(statusData.danger || false);
+        }
       } catch (err) {}
     };
-    fetchHealth();
-    const iv = setInterval(fetchHealth, 10000);
+
+    fetchHealthAndStatus();
+    const iv = setInterval(fetchHealthAndStatus, 2000);
     return () => clearInterval(iv);
   }, [backendUrl]);
 
@@ -89,16 +102,21 @@ export default function Home() {
   };
 
   return (
-    <main className="min-h-screen bg-black text-gray-100 p-4 md:p-8 font-sans">
+    <main className={`min-h-screen p-4 md:p-8 font-sans transition-colors duration-500 ${isDanger ? 'bg-red-950/80 animate-pulse' : 'bg-black text-gray-100'}`}>
       <div className="max-w-7xl mx-auto space-y-6">
         
         {/* Header */}
         <header className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-gray-800 pb-6">
           <div>
-            <h1 className="text-3xl font-bold bg-gradient-to-r from-blue-400 to-emerald-400 bg-clip-text text-transparent flex items-center gap-2">
-              <Activity className="w-8 h-8 text-emerald-400" /> NusaRail Sentinel
+            <h1 className="text-3xl font-bold flex items-center gap-2">
+              <Activity className={`w-8 h-8 ${isDanger ? 'text-red-500' : 'text-emerald-400'}`} /> 
+              <span className={isDanger ? 'text-red-500' : 'bg-gradient-to-r from-blue-400 to-emerald-400 bg-clip-text text-transparent'}>
+                NusaRail Sentinel
+              </span>
             </h1>
-            <p className="text-gray-400 mt-1">Enterprise-Grade Early Warning System (Phase 3 Ultimate)</p>
+            <p className="text-gray-400 mt-1">
+              Enterprise-Grade Early Warning System (Phase 4 Tactical Control)
+            </p>
           </div>
           
           <div className="flex flex-col sm:flex-row gap-4">

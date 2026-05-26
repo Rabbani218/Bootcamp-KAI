@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
-import { AlertTriangle, Clock, MapPin, Camera } from 'lucide-react';
+import { AlertTriangle, Clock, MapPin, Camera, Download, Server, Car } from 'lucide-react';
 
 interface Incident {
   id: number;
@@ -15,14 +15,23 @@ interface Incident {
 export default function AnalyticsDashboard({ backendUrl }: { backendUrl: string }) {
   const [incidents, setIncidents] = useState<Incident[]>([]);
   const [loading, setLoading] = useState(true);
+  const [sysStatus, setSysStatus] = useState({ uptime: 0, active_objects: 0 });
 
   useEffect(() => {
-    const fetchIncidents = async () => {
+    const fetchData = async () => {
       try {
-        const res = await fetch(`${backendUrl}/api/incidents`);
-        const data = await res.json();
-        if (Array.isArray(data)) {
-          setIncidents(data);
+        const [incRes, statRes] = await Promise.all([
+          fetch(`${backendUrl}/api/incidents`).catch(()=>null),
+          fetch(`${backendUrl}/api/status`).catch(()=>null)
+        ]);
+
+        if (incRes) {
+          const data = await incRes.json();
+          if (Array.isArray(data)) setIncidents(data);
+        }
+        if (statRes) {
+          const data = await statRes.json();
+          setSysStatus({ uptime: data.uptime || 0, active_objects: data.active_objects || 0 });
         }
       } catch (err) {
         console.error(err);
@@ -31,10 +40,37 @@ export default function AnalyticsDashboard({ backendUrl }: { backendUrl: string 
       }
     };
     
-    fetchIncidents();
-    const iv = setInterval(fetchIncidents, 15000);
+    fetchData();
+    const iv = setInterval(fetchData, 5000);
     return () => clearInterval(iv);
   }, [backendUrl]);
+
+  const handleExportCSV = () => {
+    if (incidents.length === 0) return;
+    
+    let csvContent = "data:text/csv;charset=utf-8,";
+    csvContent += "ID,Waktu,Lokasi,Jenis,URL Foto\n";
+    
+    incidents.forEach(inc => {
+      const timeStr = new Date(inc.timestamp * 1000).toLocaleString();
+      csvContent += `${inc.id},"${timeStr}","${inc.lokasi}","${inc.jenis}","${backendUrl}${inc.snapshot_url}"\n`;
+    });
+    
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement("a");
+    link.setAttribute("href", encodedUri);
+    link.setAttribute("download", `nusarail_report_${Date.now()}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  const formatUptime = (seconds: number) => {
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const s = seconds % 60;
+    return `${h}h ${m}m ${s}s`;
+  };
 
   // Transform data for chart (Count incidents per hour/minute)
   const chartData = incidents.reduce((acc: any[], curr) => {
@@ -55,20 +91,32 @@ export default function AnalyticsDashboard({ backendUrl }: { backendUrl: string 
 
   return (
     <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
         <div className="bg-gray-900 border border-gray-800 p-6 rounded-xl shadow-lg">
           <div className="text-gray-400 text-sm font-medium mb-1">Total Insiden</div>
-          <div className="text-4xl font-bold text-emerald-400">{incidents.length}</div>
+          <div className="text-3xl font-bold text-red-400">{incidents.length}</div>
         </div>
         <div className="bg-gray-900 border border-gray-800 p-6 rounded-xl shadow-lg">
-          <div className="text-gray-400 text-sm font-medium mb-1">Insiden Terakhir</div>
-          <div className="text-lg font-semibold text-white truncate">
-            {incidents.length > 0 ? incidents[0].jenis : '-'}
+          <div className="text-gray-400 text-sm font-medium mb-1 flex items-center gap-1">
+            <Server className="w-4 h-4" /> Uptime Server
+          </div>
+          <div className="text-xl font-semibold text-white mt-1">
+            {formatUptime(sysStatus.uptime)}
           </div>
         </div>
         <div className="bg-gray-900 border border-gray-800 p-6 rounded-xl shadow-lg">
-          <div className="text-gray-400 text-sm font-medium mb-1">Status Database</div>
-          <div className="text-lg font-semibold text-blue-400">Online (SQLite)</div>
+          <div className="text-gray-400 text-sm font-medium mb-1 flex items-center gap-1">
+            <Car className="w-4 h-4" /> Kendaraan Dilacak
+          </div>
+          <div className="text-2xl font-bold text-emerald-400">{sysStatus.active_objects}</div>
+        </div>
+        <div className="bg-gray-900 border border-gray-800 p-6 rounded-xl shadow-lg flex flex-col justify-center">
+          <button 
+            onClick={handleExportCSV}
+            className="w-full py-3 px-4 bg-gray-800 hover:bg-gray-700 text-white font-medium rounded-lg transition-colors border border-gray-700 hover:border-gray-500 flex items-center justify-center gap-2"
+          >
+            <Download className="w-4 h-4" /> Export CSV Laporan
+          </button>
         </div>
       </div>
 
