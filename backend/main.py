@@ -167,14 +167,15 @@ async def extract_youtube_url_async(url: str) -> Optional[str]:
         return "ERROR"
 
 def load_yolo_onnx():
-    """Load YOLO ONNX model dengan fallback ke download model COCO standar jika tidak ada."""
+    """Load YOLO ONNX model. Prioritas: best_web_optimized.onnx -> yolov8s.onnx (auto-download)."""
     import onnxruntime as ort
     
-    # Cari model di beberapa lokasi
+    # Urutan pencarian model
     search_paths = [
         Path(__file__).parent / YOLO_MODEL,
         Path(__file__).parent / "Dataset" / YOLO_MODEL,
-        Path(__file__).parent / "yolov8n.onnx",  # Fallback COCO model
+        Path(__file__).parent / "yolov8s.onnx",
+        Path(__file__).parent / "yolov8n.onnx",
     ]
     
     model_path = None
@@ -184,31 +185,55 @@ def load_yolo_onnx():
             break
     
     if model_path is None:
-        # Download YOLOv8n ONNX (model COCO standar, 6MB) sebagai fallback
-        log.warning(f"Model {YOLO_MODEL} tidak ditemukan. Mendownload yolov8n.onnx dari Ultralytics...")
+        # Auto-download yolov8s.onnx (COCO 80 kelas, 22MB, akurasi baik)
+        log.warning("Tidak ada model ONNX. Mendownload yolov8s.onnx dari Ultralytics...")
         try:
             import urllib.request
-            fallback_path = Path(__file__).parent / "yolov8n.onnx"
-            url = "https://github.com/ultralytics/assets/releases/download/v0.0.0/yolov8n.onnx"
+            fallback_path = Path(__file__).parent / "yolov8s.onnx"
+            # YOLOv8s ONNX - full COCO 80 classes, better accuracy than nano
+            url = "https://github.com/ultralytics/assets/releases/download/v0.0.0/yolov8s.onnx"
+            log.info(f"Mendownload dari: {url}")
             urllib.request.urlretrieve(url, str(fallback_path))
             model_path = fallback_path
-            log.info(f"Fallback model berhasil didownload: {fallback_path}")
+            log.info(f"Download selesai: {fallback_path} ({fallback_path.stat().st_size // 1024} KB)")
         except Exception as e:
-            log.error(f"Gagal download fallback model: {e}")
+            log.error(f"Gagal download model: {e}")
             return None
     
     try:
-        log.info(f"Memuat model ONNX: {model_path}")
+        log.info(f"Memuat model ONNX: {model_path.name}")
         providers = ['CPUExecutionProvider']
         session = ort.InferenceSession(str(model_path), providers=providers)
         
-        # Verifikasi input shape model
-        input_shape = session.get_inputs()[0].shape
-        log.info(f"Model dimuat. Input shape: {input_shape}")
-        
-        # Verifikasi output shape untuk menentukan jumlah kelas
+        # Verifikasi shape untuk mendeteksi apakah ini model COCO lengkap
+        input_shape  = session.get_inputs()[0].shape
         output_shape = session.get_outputs()[0].shape
-        log.info(f"Model output shape: {output_shape}")
+        
+        log.info(f"[Model] Input: {input_shape} | Output: {output_shape}")
+        
+        # Deteksi jumlah kelas dari output shape
+        # Format YOLOv8: [batch, 4+num_classes, num_anchors]
+        if len(output_shape) == 3:
+            num_classes = output_shape[1] - 4 if output_shape[1] > 4 else output_shape[2] - 4
+            log.info(f"[Model] Jumlah kelas terdeteksi: {num_classes}")
+            if num_classes < 10:
+                log.warning(f"[Model] PERINGATAN: Model hanya memiliki {num_classes} kelas!"
+                            " Kemungkinan bukan model COCO standar (80 kelas).")
+                log.warning("[Model] Akan mencoba download yolov8s.onnx sebagai pengganti...")
+                # Hapus session, lanjut ke download
+                del session
+                
+                fallback_path = Path(__file__).parent / "yolov8s.onnx"
+                if not fallback_path.exists():
+                    import urllib.request
+                    url = "https://github.com/ultralytics/assets/releases/download/v0.0.0/yolov8s.onnx"
+                    urllib.request.urlretrieve(url, str(fallback_path))
+                    log.info("Download yolov8s.onnx selesai sebagai pengganti.")
+                
+                session = ort.InferenceSession(str(fallback_path), providers=providers)
+                out2 = session.get_outputs()[0].shape
+                nc2 = out2[1] - 4 if out2[1] > 4 else out2[2] - 4
+                log.info(f"[Model] Fallback model dimuat. Kelas: {nc2}")
         
         return session
     except Exception as e:
@@ -235,86 +260,95 @@ def preprocess_image(img, input_size=(640, 640)):
         img = img[None]
     return img, r, (dw, dh)
 
-# COCO class mapping lengkap (80 kelas)
+# ── COCO Standard 80-Class Mapping ─────────────────────────────────────────
+# Mapping lengkap COCO dataset (80 kelas) yang digunakan oleh YOLOv8 standar
 COCO_CLASSES = {
-    0: 'person', 1: 'bicycle', 2: 'car', 3: 'motorcycle',
-    4: 'airplane', 5: 'bus', 6: 'train', 7: 'truck',
-    8: 'boat', 9: 'traffic light', 10: 'fire hydrant',
-    11: 'stop sign', 12: 'parking meter'
-    # Hanya definisikan kelas yang relevan untuk efisiensi
+    0: 'person',      1: 'bicycle',      2: 'car',          3: 'motorcycle',
+    4: 'airplane',    5: 'bus',          6: 'train',        7: 'truck',
+    8: 'boat',        9: 'traffic light',10: 'fire hydrant',11: 'stop sign',
+    12: 'parking meter', 13: 'bench',    14: 'bird',        15: 'cat',
+    16: 'dog',        17: 'horse',       18: 'sheep',       19: 'cow',
+    20: 'elephant',   21: 'bear',        22: 'zebra',       23: 'giraffe',
+    # ... kelas 24-79 tidak dipakai untuk Rail Detection
 }
 
-# Kelas prioritas yang ingin kita deteksi
-TARGET_CLASSES = {0: 'person', 2: 'car', 3: 'motorcycle', 5: 'bus', 6: 'train', 7: 'truck'}
+# Kelas yang relevan untuk NusaRail (subset dari COCO)
+TARGET_CLASSES = {
+    0: 'person',
+    2: 'car',
+    3: 'motorcycle',
+    5: 'bus',
+    6: 'train',
+    7: 'truck',
+}
 
-# Confidence threshold per kelas (lebih rendah = lebih sensitif)
+# Confidence threshold per kelas
 CONF_THRESHOLDS = {
-    'train':      0.20,   # Kereta - deteksi agresif (penting!)
-    'car':        0.20,   # Mobil
-    'truck':      0.20,   # Truk
-    'bus':        0.20,   # Bus
-    'motorcycle': 0.20,   # Motor
-    'person':     0.25,   # Orang
-    'default':    0.20,   # Default untuk kelas lain
+    'train':      0.15,   # Sangat sensitif - KRL harus terdeteksi!
+    'car':        0.15,   # Mobil
+    'truck':      0.15,   # Truk
+    'bus':        0.15,   # Bus
+    'motorcycle': 0.15,   # Motor
+    'person':     0.20,   # Orang
+    'default':    0.15,
 }
 
 def postprocess(preds, orig_shape, ratio, pad):
     """
-    Postprocess output YOLO ONNX.
-    Input preds: raw ONNX output tensor
-    orig_shape: (H, W) dari frame ASLI sebelum preprocessing
-    Mengembalikan list of {xyxy, conf, cls, orig_shape}
+    Postprocess output raw YOLO ONNX (format YOLOv8).
+    orig_shape: (H, W) frame ASLI sebelum letterbox resize.
+    Return: list of {xyxy, conf, cls, orig_shape}
     """
-    preds = preds[0]
-    preds = preds.transpose()  # (batch, 84, 8400) → (8400, 84)
+    raw = preds[0]           # (84, 8400) untuk COCO 80-kelas
+    raw = raw.transpose()    # → (8400, 84)
     
-    boxes    = preds[:, :4]           # center_x, center_y, width, height
-    scores   = preds[:, 4:]           # scores untuk setiap kelas
+    num_cols = raw.shape[1]  # 4 + num_classes
+    num_classes = num_cols - 4
     
-    max_scores = np.max(scores, axis=1)
-    class_ids  = np.argmax(scores, axis=1)
+    boxes_raw  = raw[:, :4]             # cx, cy, w, h
+    class_cols = raw[:, 4:]             # (8400, num_classes)
     
-    # Filter awal: buang semua yang conf < threshold global minimum
-    GLOBAL_MIN_CONF = 0.15
-    global_mask = max_scores >= GLOBAL_MIN_CONF
+    max_scores = np.max(class_cols, axis=1)
+    class_ids  = np.argmax(class_cols, axis=1)
     
-    if not np.any(global_mask):
+    # Filter 1: Global minimum confidence
+    GLOBAL_MIN = 0.10
+    gm = max_scores >= GLOBAL_MIN
+    if not np.any(gm):
         return []
     
-    boxes     = boxes[global_mask]
-    max_scores = max_scores[global_mask]
-    class_ids = class_ids[global_mask]
+    boxes_raw  = boxes_raw[gm]
+    max_scores = max_scores[gm]
+    class_ids  = class_ids[gm]
     
-    # Filter per kelas: hanya pertahankan kelas yang kita targetkan
-    class_mask = []
+    # Filter 2: Hanya kelas yang ada di TARGET_CLASSES dengan threshold per kelas
+    cm = []
     for i, c_id in enumerate(class_ids):
         cls_name  = TARGET_CLASSES.get(int(c_id), None)
         if cls_name is None:
-            class_mask.append(False)
+            cm.append(False)
             continue
-        threshold = CONF_THRESHOLDS.get(cls_name, CONF_THRESHOLDS['default'])
-        class_mask.append(float(max_scores[i]) >= threshold)
+        thr = CONF_THRESHOLDS.get(cls_name, CONF_THRESHOLDS['default'])
+        cm.append(float(max_scores[i]) >= thr)
     
-    class_mask = np.array(class_mask)
-    if not np.any(class_mask):
+    cm = np.array(cm)
+    if not np.any(cm):
         return []
     
-    boxes     = boxes[class_mask]
-    max_scores = max_scores[class_mask]
-    class_ids = class_ids[class_mask]
+    boxes_raw  = boxes_raw[cm]
+    max_scores = max_scores[cm]
+    class_ids  = class_ids[cm]
     
-    # Konversi center_xywh → xyxy
-    x1 = boxes[:, 0] - boxes[:, 2] / 2
-    y1 = boxes[:, 1] - boxes[:, 3] / 2
-    x2 = boxes[:, 0] + boxes[:, 2] / 2
-    y2 = boxes[:, 1] + boxes[:, 3] / 2
+    # Konversi cx,cy,w,h → x1,y1,x2,y2
+    x1 = boxes_raw[:, 0] - boxes_raw[:, 2] / 2
+    y1 = boxes_raw[:, 1] - boxes_raw[:, 3] / 2
+    x2 = boxes_raw[:, 0] + boxes_raw[:, 2] / 2
+    y2 = boxes_raw[:, 1] + boxes_raw[:, 3] / 2
     boxes = np.stack([x1, y1, x2, y2], axis=1)
     
-    # Hapus padding letterbox dan skala balik ke original frame
-    boxes[:, 0] -= pad[0]
-    boxes[:, 1] -= pad[1]
-    boxes[:, 2] -= pad[0]
-    boxes[:, 3] -= pad[1]
+    # Hapus letterbox padding
+    boxes[:, 0] -= pad[0]; boxes[:, 2] -= pad[0]
+    boxes[:, 1] -= pad[1]; boxes[:, 3] -= pad[1]
     boxes /= ratio
     
     # Clip ke batas frame asli
@@ -323,8 +357,7 @@ def postprocess(preds, orig_shape, ratio, pad):
     boxes[:, 2] = np.clip(boxes[:, 2], 0, orig_shape[1])
     boxes[:, 3] = np.clip(boxes[:, 3], 0, orig_shape[0])
     
-    # NMS: score_threshold=0.0 karena kita sudah filter per kelas di atas
-    # iou_threshold=0.45 untuk menghilangkan duplikat
+    # NMS (score_threshold=0: filter sudah dilakukan di atas)
     indices = cv2.dnn.NMSBoxes(boxes.tolist(), max_scores.tolist(), 0.0, 0.45)
     
     results = []
@@ -332,17 +365,19 @@ def postprocess(preds, orig_shape, ratio, pad):
         for i in indices.flatten():
             cls_id   = int(class_ids[i])
             cls_name = TARGET_CLASSES.get(cls_id, 'unknown')
+            b        = boxes[i].astype(int).tolist()
             results.append({
-                "xyxy":        boxes[i].astype(int).tolist(),
-                "conf":        float(max_scores[i]),
-                "cls":         cls_name,
-                "orig_shape":  orig_shape,   # Simpan dimensi frame asal untuk scaling
+                "xyxy":       b,
+                "conf":       float(max_scores[i]),
+                "cls":        cls_name,
+                "orig_shape": orig_shape,
             })
     
-    # Debug log (hanya jika ada deteksi)
     if results:
-        summary = ", ".join([f"{d['cls']}({d['conf']:.2f})" for d in results])
-        log.info(f"[YOLO] Deteksi: {summary} | Frame: {orig_shape[1]}x{orig_shape[0]}")
+        log.info("[YOLO] " + " | ".join(
+            f"{d['cls']} {d['conf']:.0%} [{d['xyxy'][0]},{d['xyxy'][1]}]-[{d['xyxy'][2]},{d['xyxy'][3]}]"
+            for d in results
+        ))
     
     return results
 
@@ -977,6 +1012,55 @@ def get_incidents():
     except Exception as e:
         return {"error": str(e)}
 
+@app.get("/api/debug/model")
+def debug_model():
+    """
+    Endpoint diagnostik untuk memeriksa status model YOLO.
+    Akses: GET /api/debug/model
+    Berguna untuk mendiagnosa jika kendaraan tidak terdeteksi.
+    """
+    session = app_state.yolo_session
+    if session is None:
+        return {"status": "ERROR", "message": "YOLO session belum dimuat atau gagal dimuat."}
+    
+    try:
+        inp  = session.get_inputs()[0]
+        out  = session.get_outputs()[0]
+        
+        in_shape  = inp.shape
+        out_shape = out.shape
+        
+        # Hitung jumlah kelas
+        # YOLOv8 format: output shape [batch, 4+num_classes, num_anchors]
+        num_classes = "unknown"
+        class_check = "unknown"
+        if len(out_shape) == 3:
+            nc = out_shape[1] - 4
+            num_classes = nc
+            if nc == 80:
+                class_check = "✅ COCO 80 kelas (normal - deteksi kendaraan AKTIF)"
+            elif nc < 10:
+                class_check = f"⚠️ Hanya {nc} kelas! Model non-COCO. Perlu diganti ke yolov8s.onnx"
+            else:
+                class_check = f"ℹ️ {nc} kelas (custom model)"
+        
+        # Cek apakah class 6 (train) ada di TARGET_CLASSES
+        target_info = {str(k): v for k, v in TARGET_CLASSES.items()}
+        
+        return {
+            "status":          "OK",
+            "model_input":     {"name": inp.name, "shape": list(in_shape), "dtype": inp.type},
+            "model_output":    {"name": out.name, "shape": list(out_shape)},
+            "num_classes":     num_classes,
+            "class_check":     class_check,
+            "target_classes":  target_info,
+            "conf_thresholds": CONF_THRESHOLDS,
+            "last_detections": len(app_state.last_detections),
+            "streamer_active": get_streamer() is not None and get_streamer().is_alive(),
+        }
+    except Exception as e:
+        return {"status": "ERROR", "error": str(e)}
+
 @app.get("/api/status")
 def get_status():
     uptime_seconds = int(time.time() - app_state.start_time)
@@ -1050,9 +1134,10 @@ async def generate_mjpeg_stream():
             cv2.fillPoly(overlay, [polygon_abs], (0, 0, 255))
             cv2.addWeighted(overlay, 0.15, frame, 0.85, 0, frame)
             cv2.putText(frame, "DANGER ZONE", polygon_abs[0], cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
-        else:
-            # ROI default - hanya tampilkan jika tidak ada polygon
-            cv2.rectangle(frame, (int(W*0.05), int(H*0.05)), (int(W*0.95), int(H*0.95)), (100, 100, 100), 1)
+        # ── ROI Default (tersembunyi jika tidak ada polygon) ─────────────────
+        # DIHAPUS: Kotak ROI statis tidak ditampilkan lagi agar tidak membingungkan
+        # (Hanya tampilkan DANGER ZONE jika ada polygon yang dikonfigurasi)
+        pass
         
         # ── [WAJIB EKSPLISIT] Render Bounding Box dengan Coordinate Scaling ──
         # PENTING: Scale koordinat dari resolusi asli ke 640x360 display
