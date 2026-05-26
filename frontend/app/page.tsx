@@ -3,10 +3,12 @@
 import dynamic from 'next/dynamic';
 import { useState, useEffect } from 'react';
 import axios from 'axios';
-import { Youtube, Video, Upload, Activity, Radio } from 'lucide-react';
+import { Youtube, Video, Upload, Activity, Radio, BarChart3, Settings, MonitorPlay } from 'lucide-react';
 
 const VideoStream = dynamic(() => import('@/components/VideoStream'), { ssr: false });
 const GeminiOverlay = dynamic(() => import('@/components/GeminiOverlay'), { ssr: false });
+const AnalyticsDashboard = dynamic(() => import('@/components/AnalyticsDashboard'), { ssr: false });
+const AdvancedSettings = dynamic(() => import('@/components/AdvancedSettings'), { ssr: false });
 
 export default function Home() {
   let backendUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
@@ -15,7 +17,9 @@ export default function Home() {
   }
   const backendWsUrl = backendUrl.replace('http', 'ws') + '/api/ws/gemini';
   
-  const [activeTab, setActiveTab] = useState<'youtube' | 'rtsp' | 'upload'>('youtube');
+  const [mainTab, setMainTab] = useState<'monitoring' | 'analytics' | 'settings'>('monitoring');
+  const [sourceTab, setSourceTab] = useState<'youtube' | 'rtsp' | 'upload'>('youtube');
+  
   const [youtubeUrl, setYoutubeUrl] = useState("https://www.youtube.com/watch?v=q7lvnYVuqNY");
   const [rtspUrl, setRtspUrl] = useState("");
   const [uploadProgress, setUploadProgress] = useState(0);
@@ -42,10 +46,7 @@ export default function Home() {
     e.preventDefault();
     setIsUpdating(true);
     try {
-      const payload = mode === 'youtube' 
-        ? { mode, youtube_url: youtubeUrl } 
-        : { mode, rtsp_url: rtspUrl };
-        
+      const payload = mode === 'youtube' ? { mode, youtube_url: youtubeUrl } : { mode, rtsp_url: rtspUrl };
       const res = await fetch(`${backendUrl}/api/set_url`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -62,19 +63,14 @@ export default function Home() {
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!e.target.files || e.target.files.length === 0) return;
     const file = e.target.files[0];
-    
-    // Validasi < 50MB
     if (file.size > 50 * 1024 * 1024) {
       alert("File terlalu besar. Maksimal 50MB.");
       return;
     }
-
     const formData = new FormData();
     formData.append("file", file);
-
     setIsUpdating(true);
     setUploadProgress(0);
-
     try {
       await axios.post(`${backendUrl}/api/upload`, formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
@@ -102,7 +98,7 @@ export default function Home() {
             <h1 className="text-3xl font-bold bg-gradient-to-r from-blue-400 to-emerald-400 bg-clip-text text-transparent flex items-center gap-2">
               <Activity className="w-8 h-8 text-emerald-400" /> NusaRail Sentinel
             </h1>
-            <p className="text-gray-400 mt-1">Enterprise-Grade Early Warning System (Multi-Source Input)</p>
+            <p className="text-gray-400 mt-1">Enterprise-Grade Early Warning System (Phase 3 Ultimate)</p>
           </div>
           
           <div className="flex flex-col sm:flex-row gap-4">
@@ -124,87 +120,84 @@ export default function Home() {
           </div>
         </header>
 
-        {/* Input Controls */}
-        <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 shadow-xl">
-          <div className="flex gap-4 border-b border-gray-700 pb-4 mb-4">
-            <button 
-              onClick={() => setActiveTab('youtube')}
-              className={`flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition ${activeTab === 'youtube' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white'}`}
-            >
-              <Youtube className="w-5 h-5" /> YouTube Live
-            </button>
-            <button 
-              onClick={() => setActiveTab('rtsp')}
-              className={`flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition ${activeTab === 'rtsp' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white'}`}
-            >
-              <Radio className="w-5 h-5" /> RTSP CCTV
-            </button>
-            <button 
-              onClick={() => setActiveTab('upload')}
-              className={`flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition ${activeTab === 'upload' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white'}`}
-            >
-              <Upload className="w-5 h-5" /> Local Video
-            </button>
-          </div>
+        {/* Main Navigation */}
+        <div className="flex gap-4 border-b border-gray-800 pb-2">
+          <button onClick={() => setMainTab('monitoring')} className={`flex items-center gap-2 px-4 py-2 font-medium transition-colors border-b-2 ${mainTab === 'monitoring' ? 'border-blue-500 text-blue-400' : 'border-transparent text-gray-500 hover:text-gray-300'}`}>
+            <MonitorPlay className="w-5 h-5" /> Live Monitoring
+          </button>
+          <button onClick={() => setMainTab('analytics')} className={`flex items-center gap-2 px-4 py-2 font-medium transition-colors border-b-2 ${mainTab === 'analytics' ? 'border-blue-500 text-blue-400' : 'border-transparent text-gray-500 hover:text-gray-300'}`}>
+            <BarChart3 className="w-5 h-5" /> Analytics & Logs
+          </button>
+          <button onClick={() => setMainTab('settings')} className={`flex items-center gap-2 px-4 py-2 font-medium transition-colors border-b-2 ${mainTab === 'settings' ? 'border-blue-500 text-blue-400' : 'border-transparent text-gray-500 hover:text-gray-300'}`}>
+            <Settings className="w-5 h-5" /> Advanced Settings
+          </button>
+        </div>
 
-          {activeTab === 'youtube' && (
-            <form onSubmit={(e) => handleUpdateUrl(e, 'youtube')} className="flex gap-2">
-              <input 
-                type="url" value={youtubeUrl} onChange={(e) => setYoutubeUrl(e.target.value)}
-                className="flex-1 bg-gray-800 border border-gray-700 text-white rounded-md px-4 py-2 focus:outline-none focus:border-blue-500"
-                placeholder="https://www.youtube.com/watch?v=..." required
-              />
-              <button type="submit" disabled={isUpdating} className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-md font-medium transition disabled:opacity-50 min-w-[150px]">
-                {isUpdating ? 'Loading...' : 'Stream YouTube'}
-              </button>
-            </form>
-          )}
+        {/* Tab Content: Analytics & Logs */}
+        {mainTab === 'analytics' && <AnalyticsDashboard backendUrl={backendUrl} />}
 
-          {activeTab === 'rtsp' && (
-            <form onSubmit={(e) => handleUpdateUrl(e, 'rtsp')} className="flex gap-2">
-              <input 
-                type="text" value={rtspUrl} onChange={(e) => setRtspUrl(e.target.value)}
-                className="flex-1 bg-gray-800 border border-gray-700 text-white rounded-md px-4 py-2 focus:outline-none focus:border-blue-500"
-                placeholder="rtsp://username:pass@192.168.1.100:554/stream" required
-              />
-              <button type="submit" disabled={isUpdating} className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-md font-medium transition disabled:opacity-50 min-w-[150px]">
-                {isUpdating ? 'Loading...' : 'Connect CCTV'}
-              </button>
-            </form>
-          )}
+        {/* Tab Content: Advanced Settings */}
+        {mainTab === 'settings' && <AdvancedSettings backendUrl={backendUrl} />}
 
-          {activeTab === 'upload' && (
-            <div className="flex items-center gap-4">
-              <input 
-                type="file" 
-                accept="video/mp4,video/x-m4v,video/*"
-                onChange={handleFileUpload}
-                disabled={isUpdating}
-                className="block w-full text-sm text-gray-400 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-blue-600 file:text-white hover:file:bg-blue-700 disabled:opacity-50"
-              />
-              {isUpdating && uploadProgress > 0 && (
-                <div className="flex-1">
-                  <div className="w-full bg-gray-700 rounded-full h-2.5">
-                    <div className="bg-blue-600 h-2.5 rounded-full transition-all duration-300" style={{ width: `${uploadProgress}%` }}></div>
-                  </div>
-                  <p className="text-xs text-gray-400 mt-1">Uploading... {uploadProgress}%</p>
+        {/* Tab Content: Live Monitoring */}
+        {mainTab === 'monitoring' && (
+          <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
+            {/* Input Controls */}
+            <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 shadow-xl">
+              <div className="flex gap-4 border-b border-gray-700 pb-4 mb-4">
+                <button onClick={() => setSourceTab('youtube')} className={`flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition ${sourceTab === 'youtube' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white'}`}>
+                  <Youtube className="w-5 h-5" /> YouTube Live
+                </button>
+                <button onClick={() => setSourceTab('rtsp')} className={`flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition ${sourceTab === 'rtsp' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white'}`}>
+                  <Radio className="w-5 h-5" /> RTSP CCTV
+                </button>
+                <button onClick={() => setSourceTab('upload')} className={`flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition ${sourceTab === 'upload' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white'}`}>
+                  <Upload className="w-5 h-5" /> Local Video
+                </button>
+              </div>
+
+              {sourceTab === 'youtube' && (
+                <form onSubmit={(e) => handleUpdateUrl(e, 'youtube')} className="flex gap-2">
+                  <input type="url" value={youtubeUrl} onChange={(e) => setYoutubeUrl(e.target.value)} className="flex-1 bg-gray-800 border border-gray-700 text-white rounded-md px-4 py-2 focus:outline-none focus:border-blue-500" placeholder="https://www.youtube.com/watch?v=..." required />
+                  <button type="submit" disabled={isUpdating} className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-md font-medium transition disabled:opacity-50 min-w-[150px]">{isUpdating ? 'Loading...' : 'Stream YouTube'}</button>
+                </form>
+              )}
+
+              {sourceTab === 'rtsp' && (
+                <form onSubmit={(e) => handleUpdateUrl(e, 'rtsp')} className="flex gap-2">
+                  <input type="text" value={rtspUrl} onChange={(e) => setRtspUrl(e.target.value)} className="flex-1 bg-gray-800 border border-gray-700 text-white rounded-md px-4 py-2 focus:outline-none focus:border-blue-500" placeholder="rtsp://username:pass@192.168.1.100:554/stream" required />
+                  <button type="submit" disabled={isUpdating} className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-md font-medium transition disabled:opacity-50 min-w-[150px]">{isUpdating ? 'Loading...' : 'Connect CCTV'}</button>
+                </form>
+              )}
+
+              {sourceTab === 'upload' && (
+                <div className="flex items-center gap-4">
+                  <input type="file" accept="video/mp4,video/x-m4v,video/*" onChange={handleFileUpload} disabled={isUpdating} className="block w-full text-sm text-gray-400 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-blue-600 file:text-white hover:file:bg-blue-700 disabled:opacity-50" />
+                  {isUpdating && uploadProgress > 0 && (
+                    <div className="flex-1">
+                      <div className="w-full bg-gray-700 rounded-full h-2.5">
+                        <div className="bg-blue-600 h-2.5 rounded-full transition-all duration-300" style={{ width: `${uploadProgress}%` }}></div>
+                      </div>
+                      <p className="text-xs text-gray-400 mt-1">Uploading... {uploadProgress}%</p>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
-          )}
-        </div>
 
-        {/* Main Content Area */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          <div className="lg:col-span-2 space-y-4">
-            <div className="bg-gray-900 border border-gray-800 p-1 rounded-xl shadow-2xl">
-              <VideoStream backendUrl={backendUrl} mode={activeTab} streamKey={activeTab === 'youtube' ? youtubeUrl : (activeTab === 'rtsp' ? rtspUrl : 'upload')} isUpdating={isUpdating} />
+            {/* Main Content Area */}
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+              <div className="lg:col-span-2 space-y-4">
+                <div className="bg-gray-900 border border-gray-800 p-1 rounded-xl shadow-2xl">
+                  <VideoStream backendUrl={backendUrl} mode={sourceTab} streamKey={sourceTab === 'youtube' ? youtubeUrl : (sourceTab === 'rtsp' ? rtspUrl : 'upload')} isUpdating={isUpdating} />
+                </div>
+              </div>
+              <div className="lg:col-span-1">
+                <GeminiOverlay backendWsUrl={backendWsUrl} />
+              </div>
             </div>
           </div>
-          <div className="lg:col-span-1">
-            <GeminiOverlay backendWsUrl={backendWsUrl} />
-          </div>
-        </div>
+        )}
       </div>
     </main>
   );

@@ -7,6 +7,7 @@ import time
 import math
 import shutil
 from pathlib import Path
+import sqlite3
 from typing import Dict, List, Optional
 
 import cv2
@@ -19,6 +20,24 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+
+# Inisialisasi Database SQLite
+def init_db():
+    conn = sqlite3.connect("incidents.db")
+    c = conn.cursor()
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS incidents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp INTEGER,
+            lokasi TEXT,
+            jenis TEXT,
+            snapshot_url TEXT
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+init_db()
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -56,6 +75,11 @@ class AppState:
         self.yolo_session = None
         self.frame_lock = asyncio.Lock()
         self.yolo_danger: bool = False
+        
+        # Advanced Features State
+        self.telegram_token: str = ""
+        self.telegram_chat_id: str = ""
+        self.polygon_points: List[Dict[str, float]] = [] # [{x, y}] format (0.0-1.0)
 
 app_state = AppState()
 
@@ -254,17 +278,17 @@ class AlertDispatcher:
         except Exception as e:
             log.warning(f"MQTT gagal terhubung: {e}")
             
-    async def dispatch_alert(self, lokasi: str, bahaya: bool, frame: np.ndarray):
+    async def dispatch_alert(self, lokasi: str, bahaya: bool, frame: np.ndarray, jenis: str = "Kendaraan Mogok"):
         timestamp = int(time.time())
         filename = f"snapshot_{timestamp}.jpg"
         filepath = os.path.join("temp_snapshots", filename)
         
         cv2.imwrite(filepath, frame)
         
-        # Cleanup old snapshots > 10 files
+        # Cleanup old snapshots > 20 files
         try:
             files = sorted(Path("temp_snapshots").glob("*.jpg"), key=os.path.getmtime)
-            if len(files) > 10:
+            if len(files) > 20:
                 os.remove(files[0])
         except:
             pass
@@ -272,26 +296,56 @@ class AlertDispatcher:
         # Mock public URL based on HF space structure or just path
         snapshot_url = f"/snapshots/{filename}"
         
+        # 1. Simpan ke Database SQLite
+        try:
+            conn = sqlite3.connect("incidents.db")
+            c = conn.cursor()
+            c.execute("INSERT INTO incidents (timestamp, lokasi, jenis, snapshot_url) VALUES (?, ?, ?, ?)",
+                      (timestamp, lokasi, jenis, snapshot_url))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            log.error(f"Gagal simpan ke DB: {e}")
+        
         payload = {
             "timestamp": timestamp,
             "lokasi": lokasi,
             "tingkat_bahaya": "KRITIS" if bahaya else "PERINGATAN",
-            "snapshot_url": snapshot_url
+            "snapshot_url": snapshot_url,
+            "jenis": jenis
         }
         
-        # Webhook
+        # 2. Webhook DJKA
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(DJKA_WEBHOOK_URL, json=payload, timeout=5) as resp:
-                    log.info(f"Webhook DJKA response: {resp.status}")
+                    pass
         except Exception as e:
             log.error(f"Gagal kirim Webhook: {e}")
             
-        # MQTT Publish
+        # 3. MQTT Publish
         try:
             self.mqtt_client.publish("nusarail/alerts/gate", json.dumps(payload))
         except Exception as e:
             log.error(f"Gagal publish MQTT: {e}")
+            
+        # 4. Telegram Bot (Bila Dikonfigurasi)
+        if app_state.telegram_token and app_state.telegram_chat_id:
+            try:
+                caption = f"🚨 PERINGATAN BAHAYA 🚨\nLokasi: {lokasi}\nJenis: {jenis}"
+                url = f"https://api.telegram.org/bot{app_state.telegram_token}/sendPhoto"
+                with open(filepath, 'rb') as f:
+                    form = aiohttp.FormData()
+                    form.add_field('chat_id', app_state.telegram_chat_id)
+                    form.add_field('caption', caption)
+                    form.add_field('photo', f, filename=filename, content_type='image/jpeg')
+                    
+                    async with aiohttp.ClientSession() as session:
+                        async with session.post(url, data=form, timeout=10) as resp:
+                            if resp.status != 200:
+                                log.error(f"Telegram API Error: {await resp.text()}")
+            except Exception as e:
+                log.error(f"Gagal kirim Telegram: {e}")
 
 alert_dispatcher = AlertDispatcher()
 
@@ -412,10 +466,14 @@ async def yolo_inference_loop():
             await asyncio.sleep(1 / 15.0)
             
         current_time = time.time()
+        H, W = frame.shape[:2]
         
-        # Apply ROI: Mask bagian luar kotak tengah (20% tepi dihitamkan)
-        # H, W = frame.shape[:2]
-        # Tidak perlu hard crop, kita cukup abaikan deteksi di pinggir
+        # Setup Absolute Polygon for Geo-Fencing Point-in-Polygon Test
+        polygon_abs = []
+        if len(app_state.polygon_points) >= 3:
+            for pt in app_state.polygon_points:
+                polygon_abs.append([int(pt['x'] * W), int(pt['y'] * H)])
+            polygon_abs = np.array(polygon_abs, np.int32)
         
         # Enhance frame for tracking/yolo
         yolo_frame = enhance_low_light(frame)
@@ -479,19 +537,27 @@ async def yolo_inference_loop():
                 det['track_id'] = matched_id
                 det['mogok'] = is_mogok
                 
-                # Cek danger
-                if det['cls'] == 'train':
-                    yolo_is_danger = True
-                elif is_mogok:
-                    yolo_is_danger = True
-                    # Dispatch Alert jika mogok > threshold
-                    if current_time - tdata.get('last_alert_time', 0) > 30: # Cooldown 30 detik
-                        asyncio.create_task(alert_dispatcher.dispatch_alert(
-                            lokasi=app_state.gemini_report.get("lokasi", "Unknown"),
-                            bahaya=True,
-                            frame=frame
-                        ))
-                        tdata['last_alert_time'] = current_time
+                # Cek danger dengan Geo-Fencing
+                inside_polygon = True
+                if len(polygon_abs) >= 3:
+                    dist = cv2.pointPolygonTest(polygon_abs, (float(cx), float(cy)), False)
+                    if dist < 0:
+                        inside_polygon = False
+
+                if inside_polygon:
+                    if det['cls'] == 'train':
+                        yolo_is_danger = True
+                    elif is_mogok:
+                        yolo_is_danger = True
+                        # Dispatch Alert jika mogok > threshold
+                        if current_time - tdata.get('last_alert_time', 0) > 30: # Cooldown 30 detik
+                            asyncio.create_task(alert_dispatcher.dispatch_alert(
+                                lokasi=app_state.gemini_report.get("lokasi", "Unknown"),
+                                bahaya=True,
+                                frame=frame,
+                                jenis=f"Mogok ({det['cls']})"
+                            ))
+                            tdata['last_alert_time'] = current_time
 
             trackers = new_trackers
             app_state.yolo_danger = yolo_is_danger
@@ -506,10 +572,16 @@ async def yolo_inference_loop():
         # Render Bounding Boxes
         display_frame = frame.copy()
         
-        # Draw Region of Interest Box (Visual only)
-        H, W = display_frame.shape[:2]
-        cv2.rectangle(display_frame, (int(W*0.1), int(H*0.2)), (int(W*0.9), int(H*0.9)), (255,255,0), 1, cv2.LINE_AA)
-        cv2.putText(display_frame, "ROI Area", (int(W*0.1), int(H*0.2)-10), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255,255,0), 1)
+        if len(polygon_abs) >= 3:
+            cv2.polylines(display_frame, [polygon_abs], True, (0, 0, 255), 2)
+            # Isi polygon transparan
+            overlay = display_frame.copy()
+            cv2.fillPoly(overlay, [polygon_abs], (0, 0, 255))
+            cv2.addWeighted(overlay, 0.15, display_frame, 0.85, 0, display_frame)
+            cv2.putText(display_frame, "DANGER ZONE", polygon_abs[0], cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+        else:
+            cv2.rectangle(display_frame, (int(W*0.1), int(H*0.2)), (int(W*0.9), int(H*0.9)), (255,255,0), 1, cv2.LINE_AA)
+            cv2.putText(display_frame, "ROI Default (Seluruh Layar)", (int(W*0.1), int(H*0.2)-10), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255,255,0), 1)
 
         # Draw Timestamps
         timestamp_str = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -671,7 +743,6 @@ def set_url(req: SetUrlRequest):
 
 @app.post("/api/upload")
 async def upload_video(file: UploadFile = File(...)):
-    # Auto cleanup old files
     for old_file in Path("temp").glob("*.*"):
         try:
             os.remove(old_file)
@@ -684,6 +755,41 @@ async def upload_video(file: UploadFile = File(...)):
     app_state.target_url = file_path
     app_state.source_mode = "upload"
     return {"status": "success", "filename": file.filename}
+
+class SetTelegramRequest(BaseModel):
+    token: str
+    chat_id: str
+
+@app.post("/api/set_telegram")
+def set_telegram(req: SetTelegramRequest):
+    app_state.telegram_token = req.token
+    app_state.telegram_chat_id = req.chat_id
+    return {"status": "success"}
+
+class PolygonPointRequest(BaseModel):
+    x: float
+    y: float
+
+class SetPolygonRequest(BaseModel):
+    points: List[PolygonPointRequest]
+
+@app.post("/api/set_polygon")
+def set_polygon(req: SetPolygonRequest):
+    app_state.polygon_points = [{"x": p.x, "y": p.y} for p in req.points]
+    return {"status": "success", "points_count": len(app_state.polygon_points)}
+
+@app.get("/api/incidents")
+def get_incidents():
+    try:
+        conn = sqlite3.connect("incidents.db")
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        c.execute("SELECT * FROM incidents ORDER BY timestamp DESC LIMIT 50")
+        rows = c.fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    except Exception as e:
+        return {"error": str(e)}
 
 async def generate_mjpeg_stream():
     # 1. Instant First-Frame Yielding (Pencegah Timeout Kritis)
