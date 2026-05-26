@@ -81,15 +81,27 @@ def sanitize_url(url: str) -> str:
         return "https://www.youtube.com/watch?v=q7lvnYVuqNY"
     return url
 
+def generate_text_frame(message: str, bg_color=(0, 0, 0), text_color=(255, 255, 255)) -> np.ndarray:
+    frame = np.full((480, 640, 3), bg_color, dtype=np.uint8)
+    y0, dy = 220, 35
+    for i, line in enumerate(message.split('\n')):
+        y = y0 + i*dy
+        cv2.putText(frame, line.strip(), (20, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, text_color, 2)
+    return frame
+
 async def extract_youtube_url_async(url: str) -> Optional[str]:
     def sync_extract():
         log.info(f"Mengekstrak URL dari: {url}")
         ydl_opts = {
-            'format': 'best[height<=480]',
+            'format': 'best[height<=480]/worst',
+            'socket_timeout': 10,
+            'source_address': '0.0.0.0',
+            'force_ipv4': True,
+            'geo_bypass': True,
+            'nocheckcertificate': True,
             'quiet': True,
             'no_warnings': True,
             'noplaylist': True,
-            'nocheckcertificate': True,
             'extractor_args': {'youtube': {'player_client': ['android', 'web']}}
         }
         try:
@@ -98,30 +110,17 @@ async def extract_youtube_url_async(url: str) -> Optional[str]:
                 if info and info.get('url'):
                     return info.get('url')
         except Exception as e:
-            log.warning(f"Gagal mengekstrak stream live/default: {e}. Mencoba format VOD...")
-            # Coba ambil format VOD biasa sebagai fallback pertama
-            ydl_opts_vod = {
-                'format': 'bestvideo[height<=480]+bestaudio/best[height<=480]',
-                'quiet': True,
-                'no_warnings': True,
-                'noplaylist': True,
-                'nocheckcertificate': True
-            }
-            try:
-                with yt_dlp.YoutubeDL(ydl_opts_vod) as ydl_vod:
-                    info_vod = ydl_vod.extract_info(url, download=False)
-                    if info_vod and info_vod.get('url'):
-                        return info_vod.get('url')
-            except Exception as e2:
-                log.error(f"Gagal total mengekstrak YouTube URL (Live & VOD): {e2}")
+            raise RuntimeError(f"DownloadError: {e}")
         return None
             
-    # Timeout extraction at 30 seconds
     try:
-        return await asyncio.wait_for(asyncio.to_thread(sync_extract), timeout=30.0)
+        return await asyncio.wait_for(asyncio.to_thread(sync_extract), timeout=15.0)
     except asyncio.TimeoutError:
-        log.error("Timeout mengekstrak URL YouTube.")
-        return None
+        log.error("Timeout 15s mengekstrak URL YouTube.")
+        return "TIMEOUT"
+    except Exception as e:
+        log.error(str(e))
+        return "ERROR"
 
 def load_yolo_onnx():
     import onnxruntime as ort
@@ -261,6 +260,7 @@ async def yolo_inference_loop():
     app_state.yolo_session = load_yolo_onnx()
     
     cap = None
+    failed_reads = 0
     
     # State Tracker Objek (Centroid Tracking Sederhana)
     # id -> {"centroid": (cx, cy), "first_seen": timestamp, "last_seen": timestamp, "mogok": bool}
@@ -271,35 +271,48 @@ async def yolo_inference_loop():
     
     while app_state.running:
         if cap is None:
-            log.info("Mencoba membuat koneksi stream YouTube...")
-            url = await extract_youtube_url_async(app_state.target_url)
-            if url:
-                cap = cv2.VideoCapture(url)
-            else:
-                log.warning("YOUTUBE DIBLOKIR! Menggunakan fallback video lokal.")
-                fallback_path = str(Path(__file__).parent / "evidence" / "anomaly_20260521_055051.mp4")
-                cap = cv2.VideoCapture(fallback_path)
+            # 1. Yield frame kuning (INITIALIZING STREAM...)
+            init_frame = generate_text_frame("INITIALIZING STREAM...\nExtracting YouTube URL...", bg_color=(0, 150, 150))
+            async with app_state.frame_lock:
+                app_state.last_frame = init_frame
                 
-            # Jika cap tetap None atau gagal open
-            if not cap or not cap.isOpened():
-                await asyncio.sleep(2)
+            log.info("Mencoba membuat koneksi stream YouTube...")
+            url_result = await extract_youtube_url_async(app_state.target_url)
+            
+            if url_result == "TIMEOUT":
+                # 2. Jika yt-dlp Timeout (>15s): yield frame merah
+                err_frame = generate_text_frame("ERROR: YOUTUBE BLOCKED HF IP (TIMEOUT).\nTRY ANOTHER URL.", bg_color=(0, 0, 200))
+                async with app_state.frame_lock:
+                    app_state.last_frame = err_frame
+                await asyncio.sleep(5)
                 continue
+            elif url_result == "ERROR" or not url_result:
+                # 3. Jika DownloadError: yield frame merah
+                err_frame = generate_text_frame("ERROR: VIDEO RESTRICTED OR INVALID.", bg_color=(0, 0, 200))
+                async with app_state.frame_lock:
+                    app_state.last_frame = err_frame
+                await asyncio.sleep(5)
+                continue
+                
+            cap = cv2.VideoCapture(url_result)
+            failed_reads = 0
 
         ret, frame = cap.read()
         if not ret:
-            log.warning("Stream putus atau gagal membaca video, mencoba reconnect...")
-            cap.release()
-            cap = None
-            
-            # Hasilkan dummy error frame agar frontend tidak blank
-            err_frame = np.zeros((480, 640, 3), dtype=np.uint8)
-            cv2.putText(err_frame, "YOUTUBE ERROR / IP BLOCKED BY GOOGLE", (40, 240), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-            cv2.putText(err_frame, "Menggunakan Fallback Video... Reconnecting...", (40, 280), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-            async with app_state.frame_lock:
-                app_state.last_frame = err_frame
-                
-            await asyncio.sleep(2)
+            failed_reads += 1
+            if failed_reads >= 10:
+                # 4. Fail-Safe Loop, gagal baca 10x
+                log.warning("Stream putus atau gagal membaca video 10x beruntun. Menutup koneksi.")
+                err_frame = generate_text_frame("STREAM LOST.\nFailed to read 10 frames.", bg_color=(0, 0, 200))
+                async with app_state.frame_lock:
+                    app_state.last_frame = err_frame
+                cap.release()
+                cap = None
+                await asyncio.sleep(5)
             continue
+            
+        # Reset counter jika sukses baca
+        failed_reads = 0
             
         current_time = time.time()
         
