@@ -32,6 +32,35 @@ from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import sqlite3
+import httpx
+import threading
+
+last_emergency_time = 0
+
+def trigger_djka_emergency_brake(snapshot_frame):
+    global last_emergency_time
+    now = time.time()
+    
+    # Anti-Spam (Cooldown): Hanya kirim HTTP Request 1 kali setiap 60 detik per insiden
+    if now - last_emergency_time < 60:
+        return
+        
+    last_emergency_time = now
+    log.error("🚨 [DISPATCHER] BAHAYA KRITIS! MENGIRIM SINYAL REM DARURAT KE KRL!")
+    
+    payload = {
+        "status": "HALT",
+        "reason": "OBSTACLE_ON_TRACK",
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
+        "location": "Perlintasan JPL 18 Kalibata"
+    }
+    
+    try:
+        # Simulasi pengiriman Webhook sistem operasional DJKA / KAI
+        response = httpx.post("https://webhook.site/nusarail-emergency", json=payload, timeout=5.0)
+        log.info(f"[DISPATCHER] Respon DJKA: {response.status_code}")
+    except Exception as e:
+        log.error(f"[DISPATCHER] Gagal mengirim sinyal darurat ke server pusat: {e}")
 
 # ── DB Init ───────────────────────────────────────────────────────────────────
 def init_db():
@@ -447,59 +476,61 @@ class VideoStreamer:
                 now         = time.time()
                 detections  = []
                 stationary_ids = set()
+                is_car_stuck = False
+                is_train_incoming = False
 
                 if results[0].boxes is not None and len(results[0].boxes) > 0:
-                    boxes = results[0].boxes
-                    for box in boxes:
+                    for box in results[0].boxes:
                         cls_id   = int(box.cls[0])
                         cls_name = self.yolo_model.names.get(cls_id, str(cls_id))
                         conf_val = float(box.conf[0])
                         xyxy     = [int(v) for v in box.xyxy[0].cpu().tolist()]
 
-                        # Centroid kendaraan
                         cx = int((xyxy[0] + xyxy[2]) / 2)
                         cy = int((xyxy[1] + xyxy[3]) / 2)
 
-                        # Track ID dari ByteTrack (None jika pakai predict)
+                        # 1. Deteksi Kereta Datang (Incoming Train)
+                        if cls_name == 'train' and conf_val > 0.15:
+                            is_train_incoming = True
+
+                        # 2. Proteksi NoneType pada Track ID
                         track_id = None
                         if box.id is not None:
                             track_id = int(box.id[0])
 
-                        mogok = False  # Default: tidak terjebak
+                        mogok = False
 
-                        # Logika stationary hanya untuk kendaraan (bukan orang/kereta)
+                        # 3. Logika Kendaraan Terjebak (Hanya jika ID tersedia)
                         if cls_name in VEHICLE_CLASSES and track_id is not None:
                             with self._track_lock:
                                 if track_id not in self._tracked_vehicles:
-                                    # Pertama kali terlihat
                                     self._tracked_vehicles[track_id] = {
-                                        "cx":         cx,
-                                        "cy":         cy,
-                                        "first_seen": now,
-                                        "last_moved": now,
+                                        "cx": cx, "cy": cy,
+                                        "first_seen": now, "last_moved": now
                                     }
                                 else:
-                                    entry = self._tracked_vehicles[track_id]
-                                    dist  = math.sqrt(
-                                        (cx - entry["cx"]) ** 2 + (cy - entry["cy"]) ** 2
-                                    )
-
+                                    vh = self._tracked_vehicles[track_id]
+                                    dist = math.hypot(cx - vh["cx"], cy - vh["cy"])
+                                    
                                     if dist > STATIONARY_PX_DELTA:
-                                        # Kendaraan bergerak → reset timer
-                                        entry["cx"]         = cx
-                                        entry["cy"]         = cy
-                                        entry["last_moved"] = now
+                                        vh["cx"] = cx
+                                        vh["cy"] = cy
+                                        vh["last_moved"] = now
                                     else:
-                                        # Kendaraan tidak bergerak
-                                        diam_durasi = now - entry["last_moved"]
+                                        diam_durasi = now - vh["last_moved"]
                                         if diam_durasi >= STATIONARY_SECONDS:
                                             mogok = True
+                                            is_car_stuck = True
                                             stationary_ids.add(track_id)
-                                            log.warning(
-                                                f"[Stationary] ⚠️  Track ID {track_id} ({cls_name}) "
-                                                f"TERJEBAK {diam_durasi:.1f}s di ({cx},{cy})"
-                                            )
+                                            log.warning(f"[Stationary] ⚠️ Track ID {track_id} ({cls_name}) TERJEBAK!")
 
+                        # 4. Rendering Visual Bounding Box (Aman untuk objek tanpa ID)
+                        color = (0, 0, 255) if mogok else (0, 255, 0)
+                        label = f"{cls_name} {'TERJEBAK' if mogok else (track_id or '')}"
+                        cv2.rectangle(frame_copy, (xyxy[0], xyxy[1]), (xyxy[2], xyxy[3]), color, 2)
+                        cv2.putText(frame_copy, label, (xyxy[0], xyxy[1] - 10),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+                        
                         detections.append({
                             "cls":        cls_name,
                             "conf":       conf_val,
@@ -518,6 +549,17 @@ class VideoStreamer:
 
                 # Update stationary alert global
                 app_state.stationary_alert = len(stationary_ids) > 0
+
+                # 5. Eksekusi Fatal Hazard (Kereta Datang + Mobil Mogok)
+                if is_car_stuck and is_train_incoming:
+                    app_state.stationary_alert = True
+                    # Tembak fungsi dispatcher API menggunakan thread terpisah agar video tidak tersendat
+                    threading.Thread(target=trigger_djka_emergency_brake, args=(frame_copy.copy(),), daemon=True).start()
+                    
+                    # Teks Merah Berkedip di OpenCV (Flash Effect)
+                    if int(time.time() * 4) % 2 == 0:
+                        cv2.putText(frame_copy, "AUTO-BRAKE SIGNAL SENT TO KRL!", (50, 100),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 4, cv2.LINE_AA)
 
                 # ── PLOT NATIVE + Overlay Kendaraan Terjebak ──────────────
                 # .plot() menggambar semua bbox secara otomatis
@@ -691,7 +733,8 @@ async def gemini_analysis_loop():
     backoff = 10
 
     while app_state.running:
-        await asyncio.sleep(GEMINI_INTERVAL)
+        # Interval dinaikkan ke 25 detik demi menjaga kelonggaran kuota Free Tier API
+        await asyncio.sleep(25)
 
         # ── Ambil frame terbaru ───────────────────────────────────
         streamer    = get_streamer()
@@ -783,12 +826,20 @@ async def gemini_analysis_loop():
             err_msg = str(e)
             log.error(f"[Gemini] Error: {err_msg}")
 
-            if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
-                log.warning(f"[Gemini] Rate limit, backoff {backoff}s")
-                app_state.gemini_report["narasi"] = f"Gemini API rate limit. Coba lagi dalam {backoff}s."
-                await broadcast_ws(app_state.gemini_report)
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 120)
+            if "429" in err_msg or "resource_exhausted" in err_msg.lower() or "quota" in err_msg.lower():
+                log.warning("⚠️ [Gemini] Rate Limit 429 tercapai. Mengaktifkan sistem pendinginan (Backoff).")
+                
+                # Payload darurat agar UI tidak macet di "Mencari data..."
+                fallback_payload = {
+                    "kondisi_perlintasan": "MENDINGINKAN API",
+                    "geo_location": "Rate Limit Bypass",
+                    "insight_narasi": "Sistem AI sedang mendinginkan antrean (Rate Limit Bypass). Data visual tetap berjalan aman.",
+                    "timestamp": time.strftime("%H:%M:%S")
+                }
+                
+                await broadcast_ws(fallback_payload)
+                # Istirahatkan worker ekstra 45 detik
+                await asyncio.sleep(45)
             elif "INVALID_API_KEY" in err_msg or "401" in err_msg:
                 log.error("[Gemini] API Key tidak valid!")
                 app_state.gemini_report["narasi"] = "Error: Gemini API Key tidak valid."
