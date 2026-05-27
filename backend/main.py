@@ -1,3 +1,15 @@
+"""
+NusaRail Vision System — Backend v6
+====================================
+Arsitektur:
+  Thread 1 (VideoReader)   : cap.read() + sleep(1/fps) → latest_frame
+  Thread 2 (AIWorker)      : model.track(persist=True) + .plot() → latest_annotated_frame
+                             + Stationary Vehicle Detection (ByteTrack ID)
+  Async Task (Manager)     : Memantau source, mengelola VideoStreamer lifecycle
+  Async Task (Gemini)      : Setiap 10 detik, analisis frame via Gemini 2.0 Flash
+                             → broadcast ke semua WebSocket clients
+  Async Generator (MJPEG)  : 30 FPS strict-paced stream ke browser
+"""
 import asyncio
 import json
 import logging
@@ -48,51 +60,55 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────────
-GEMINI_API_KEY   = os.getenv("GEMINI_API_KEY", "AIzaSyCCNLkAMh6VmZuaoG1LuqkAa9O0cMA-hVA")
-GEMINI_INTERVAL  = 10
-FRONTEND_URL     = os.getenv("FRONTEND_URL", "*")
-MQTT_BROKER      = os.getenv("MQTT_BROKER", "test.mosquitto.org")
+GEMINI_API_KEY  = os.getenv("GEMINI_API_KEY", "AIzaSyCCNLkAMh6VmZuaoG1LuqkAa9O0cMA-hVA")
+GEMINI_INTERVAL = 10      # Detik antar analisis Gemini
+MQTT_BROKER     = os.getenv("MQTT_BROKER", "test.mosquitto.org")
 
-# Kelas COCO yang kita pantau (Person, Car, Motorcycle, Bus, Train, Truck)
-YOLO_CLASSES     = [0, 2, 3, 5, 6, 7]
-YOLO_CONF        = 0.15   # Lebih sensitif: menangkap KRL dan Orang kondisi malam/buram
-YOLO_IOU         = 0.45   # IoU NMS threshold
+# YOLO Config
+YOLO_CLASSES    = [0, 2, 3, 5, 6, 7]  # person, car, motorcycle, bus, train, truck
+YOLO_CONF       = 0.15                 # Sensitif untuk malam/buram
+YOLO_IOU        = 0.45
 
-# Resolusi standar WAJIB sebelum inference (Pre-scaling)
-# Mengunci skala frame agar bbox .plot() 100% presisi menempel objek
+# Pre-scaling: lock resolusi sebelum inference agar bbox 100% presisi
 INFER_W = 640
 INFER_H = 480
+
+# Stationary Vehicle Detection Config
+STATIONARY_SECONDS   = 5.0   # Detik kendaraan diam = bahaya
+STATIONARY_PX_DELTA  = 20    # Pixel centroid bergerak < ini = dianggap diam
+VEHICLE_CLASSES      = {'car', 'truck', 'bus', 'motorcycle'}
 
 # ── AppState ──────────────────────────────────────────────────────────────────
 class AppState:
     def __init__(self):
-        self.source_mode: str      = "youtube"
-        self.target_url: str       = "https://www.youtube.com/watch?v=q7lvnYVuqNY"
-        self.stream_url            = None
-        self.last_frame            = None      # Frame mentah (untuk Gemini)
-        self.last_detections       = []
-        self.gemini_report: Dict   = {
+        self.source_mode: str       = "youtube"
+        self.target_url: str        = "https://www.youtube.com/watch?v=q7lvnYVuqNY"
+        self.last_frame             = None
+        self.last_detections        = []
+        self.gemini_report: Dict    = {
             "status":  "MENGINISIALISASI",
             "lokasi":  "Mencari data...",
             "narasi":  "Sistem sedang dijalankan."
         }
         self.clients: List[WebSocket] = []
-        self.running: bool         = False
-        self.yolo_model            = None      # Ultralytics YOLO object
-        self.frame_lock            = asyncio.Lock()
-        self.yolo_danger: bool     = False
-        self.telegram_token: str   = ""
-        self.telegram_chat_id: str = ""
-        self.polygon_points        = []
-        self.djka_webhook_url: str = os.getenv("DJKA_WEBHOOK_URL", "https://httpbin.org/post")
-        self.mqtt_broker: str      = MQTT_BROKER
-        self.start_time: float     = time.time()
-        self.active_objects_count  = 0
+        self.running: bool          = False
+        self.yolo_model             = None
+        self.frame_lock             = asyncio.Lock()
+        self.yolo_danger: bool      = False
+        self.telegram_token: str    = ""
+        self.telegram_chat_id: str  = ""
+        self.polygon_points         = []
+        self.djka_webhook_url: str  = os.getenv("DJKA_WEBHOOK_URL", "https://httpbin.org/post")
+        self.mqtt_broker: str       = MQTT_BROKER
+        self.start_time: float      = time.time()
+        self.active_objects_count   = 0
+        # Stationary tracking (thread-safe via threading.Lock)
+        self.stationary_alert: bool = False
 
 app_state = AppState()
 
-# ── FastAPI App ───────────────────────────────────────────────────────────────
-app = FastAPI(title="NusaRail Sentinel Backend API v5 (Ultralytics Native)")
+# ── FastAPI ───────────────────────────────────────────────────────────────────
+app = FastAPI(title="NusaRail Sentinel Backend v6")
 
 app.add_middleware(
     CORSMiddleware,
@@ -105,74 +121,62 @@ app.add_middleware(
 # ── Model Loader ──────────────────────────────────────────────────────────────
 def load_yolo_model():
     """
-    Muat model Ultralytics YOLO.
-    Urutan prioritas:
-      1. Custom model (best_web_optimized.onnx / .pt) jika ada
-      2. yolov8s.pt - auto-download dari Ultralytics (COCO 80 kelas, lebih akurat)
-      3. yolov8n.pt - fallback nano (paling kecil)
+    Load Ultralytics YOLO model.
+    Prioritas: custom model lokal → yolov8n.pt (auto-download COCO 80 kelas).
     """
     from ultralytics import YOLO
 
-    # Lokasi pencarian custom model
-    custom_paths = [
-        Path(__file__).parent / YOLO_MODEL_PATH,
-        Path(__file__).parent / "Dataset" / YOLO_MODEL_PATH,
+    search_paths = [
+        Path(__file__).parent / os.getenv("YOLO_MODEL", "best_web_optimized.onnx"),
+        Path(__file__).parent / "Dataset" / os.getenv("YOLO_MODEL", "best_web_optimized.onnx"),
         Path(__file__).parent / "yolov8s.onnx",
         Path(__file__).parent / "yolov8n.onnx",
     ]
 
     model_path = None
-    for p in custom_paths:
+    for p in search_paths:
         if p.exists():
             model_path = str(p)
-            log.info(f"[ModelLoader] Ditemukan model lokal: {p.name}")
+            log.info(f"[ModelLoader] Model lokal ditemukan: {p.name}")
             break
 
     if model_path is None:
-        # Auto-download yolov8n.pt dari Ultralytics (COCO 80 kelas, 6MB)
         model_path = "yolov8n.pt"
-        log.warning(f"[ModelLoader] Tidak ada model lokal. Menggunakan '{model_path}' (auto-download).")
+        log.warning(f"[ModelLoader] Tidak ada model lokal → auto-download {model_path}")
 
     try:
-        log.info(f"[ModelLoader] Memuat: {model_path}")
         model = YOLO(model_path)
+        names = model.names if hasattr(model, 'names') else {}
+        has_car   = any('car'   in str(v).lower() for v in names.values())
+        has_train = any('train' in str(v).lower() for v in names.values())
+        log.info(f"[ModelLoader] ✅ {model_path} | Kelas: {len(names)} | car={has_car} | train={has_train}")
 
-        # Verifikasi: apakah model mendukung kelas kendaraan?
-        if hasattr(model, 'names'):
-            cls_names = model.names
-            has_car   = any('car'   in str(v).lower() for v in cls_names.values())
-            has_train = any('train' in str(v).lower() for v in cls_names.values())
-            log.info(f"[ModelLoader] Jumlah kelas: {len(cls_names)} | car={has_car} | train={has_train}")
+        if not has_car:
+            log.warning("[ModelLoader] Model tidak mengenali 'car', ganti ke yolov8n.pt COCO...")
+            model = YOLO("yolov8n.pt")
+            log.info(f"[ModelLoader] Fallback yolov8n.pt: {len(model.names)} kelas")
 
-            if not has_car:
-                log.warning("[ModelLoader] Model tidak mengenali 'car'! Mengganti ke yolov8n.pt COCO...")
-                model = YOLO("yolov8n.pt")
-                log.info(f"[ModelLoader] Fallback yolov8n.pt dimuat. Kelas: {len(model.names)}")
-
-        log.info(f"[ModelLoader] ✅ Model siap: {model_path}")
         return model
-
     except Exception as e:
-        log.error(f"[ModelLoader] Gagal memuat {model_path}: {e}")
+        log.error(f"[ModelLoader] Gagal muat {model_path}: {e}")
         try:
-            log.warning("[ModelLoader] Mencoba fallback yolov8n.pt...")
-            return YOLO("yolov8n.pt")
+            model = YOLO("yolov8n.pt")
+            log.info("[ModelLoader] Fallback yolov8n.pt berhasil.")
+            return model
         except Exception as e2:
-            log.error(f"[ModelLoader] Fallback gagal: {e2}")
+            log.error(f"[ModelLoader] Fallback juga gagal: {e2}")
             return None
 
-# ── Utilities ─────────────────────────────────────────────────────────────────
+# ── Utility ───────────────────────────────────────────────────────────────────
 def generate_text_frame(message: str, bg_color=(20, 20, 20), text_color=(255, 255, 255)) -> np.ndarray:
     frame = np.full((360, 640, 3), bg_color, dtype=np.uint8)
-    y0, dy = 160, 35
     for i, line in enumerate(message.split('\n')):
-        y = y0 + i * dy
+        y = 160 + i * 35
         cv2.putText(frame, line.strip(), (30, y), cv2.FONT_HERSHEY_SIMPLEX, 0.65, text_color, 2, cv2.LINE_AA)
     return frame
 
 async def extract_youtube_url_async(url: str) -> Optional[str]:
     def sync_extract():
-        log.info(f"[yt-dlp] Mengekstrak: {url}")
         cookie_path = os.path.join(os.path.dirname(__file__), 'cookies.txt')
         ydl_opts = {
             'format': 'best[height<=480]/worst',
@@ -187,14 +191,9 @@ async def extract_youtube_url_async(url: str) -> Optional[str]:
         }
         if os.path.exists(cookie_path):
             ydl_opts['cookiefile'] = cookie_path
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=False)
-                if info and info.get('url'):
-                    return info.get('url')
-        except Exception as e:
-            raise RuntimeError(str(e))
-        return None
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            return info.get('url') if info else None
 
     try:
         return await asyncio.wait_for(asyncio.to_thread(sync_extract), timeout=20.0)
@@ -204,6 +203,34 @@ async def extract_youtube_url_async(url: str) -> Optional[str]:
         log.error(f"[yt-dlp] Error: {e}")
         return "ERROR"
 
+# ── WebSocket Broadcaster ─────────────────────────────────────────────────────
+async def broadcast_ws(payload: dict):
+    """
+    Broadcast JSON ke semua WebSocket clients yang terhubung.
+    Ini adalah fungsi KUNCI untuk menghidupkan Gemini Panel di frontend.
+    """
+    if not app_state.clients:
+        return
+
+    # Override status jika YOLO mendeteksi bahaya kendaraan terjebak
+    if app_state.stationary_alert:
+        payload = payload.copy()
+        payload["status"] = "⚠️ BAHAYA: KENDARAAN TERJEBAK DI REL"
+
+    msg = json.dumps(payload, ensure_ascii=False)
+    log.info(f"[WS Broadcast] → {len(app_state.clients)} klien | status={payload.get('status')}")
+
+    disconnected = []
+    for ws in list(app_state.clients):
+        try:
+            await ws.send_text(msg)
+        except Exception:
+            disconnected.append(ws)
+
+    for ws in disconnected:
+        if ws in app_state.clients:
+            app_state.clients.remove(ws)
+
 # ── Alert Dispatcher ──────────────────────────────────────────────────────────
 class AlertDispatcher:
     def __init__(self):
@@ -211,18 +238,16 @@ class AlertDispatcher:
         try:
             self.mqtt_client.connect(app_state.mqtt_broker, 1883, 60)
             self.mqtt_client.loop_start()
-            log.info("[MQTT] Connected")
         except Exception as e:
             log.warning(f"[MQTT] Gagal terhubung: {e}")
 
-    async def dispatch_alert(self, lokasi: str, bahaya: bool, frame: np.ndarray, jenis: str = "Kendaraan Mogok"):
-        timestamp    = int(time.time())
-        filename     = f"snapshot_{timestamp}.jpg"
+    async def dispatch_alert(self, lokasi: str, bahaya: bool, frame: np.ndarray, jenis: str = "Kendaraan Terjebak"):
+        timestamp   = int(time.time())
+        filename    = f"snapshot_{timestamp}.jpg"
         os.makedirs("temp_snapshots", exist_ok=True)
-        filepath     = os.path.join("temp_snapshots", filename)
+        filepath    = os.path.join("temp_snapshots", filename)
         cv2.imwrite(filepath, frame)
 
-        # Cleanup snapshot lama
         try:
             files = sorted(Path("temp_snapshots").glob("*.jpg"), key=os.path.getmtime)
             if len(files) > 20:
@@ -233,33 +258,28 @@ class AlertDispatcher:
         snapshot_url = f"/snapshots/{filename}"
         try:
             conn = sqlite3.connect("incidents.db")
-            c    = conn.cursor()
+            c = conn.cursor()
             c.execute("INSERT INTO incidents (timestamp, lokasi, jenis, snapshot_url) VALUES (?, ?, ?, ?)",
                       (timestamp, lokasi, jenis, snapshot_url))
             conn.commit()
             conn.close()
         except Exception as e:
-            log.error(f"[DB] Gagal simpan: {e}")
+            log.error(f"[DB] {e}")
 
-        payload = {
-            "timestamp":       timestamp,
-            "lokasi":          lokasi,
-            "tingkat_bahaya":  "KRITIS" if bahaya else "PERINGATAN",
-            "snapshot_url":    snapshot_url,
-            "jenis":           jenis
-        }
+        payload = {"timestamp": timestamp, "lokasi": lokasi,
+                   "tingkat_bahaya": "KRITIS" if bahaya else "PERINGATAN",
+                   "snapshot_url": snapshot_url, "jenis": jenis}
 
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(app_state.djka_webhook_url, json=payload, timeout=5) as resp:
-                    pass
-        except Exception as e:
-            log.error(f"[Webhook] Error: {e}")
+            async with aiohttp.ClientSession() as s:
+                await s.post(app_state.djka_webhook_url, json=payload, timeout=aiohttp.ClientTimeout(total=5))
+        except:
+            pass
 
         try:
             self.mqtt_client.publish("nusarail/alerts/gate", json.dumps(payload))
-        except Exception as e:
-            log.error(f"[MQTT] Publish error: {e}")
+        except:
+            pass
 
         if app_state.telegram_token and app_state.telegram_chat_id:
             try:
@@ -271,50 +291,22 @@ class AlertDispatcher:
                     form.add_field('caption', caption)
                     form.add_field('photo', f, filename=filename, content_type='image/jpeg')
                     async with aiohttp.ClientSession() as s:
-                        async with s.post(url, data=form, timeout=10) as resp:
-                            if resp.status != 200:
-                                log.error(f"[Telegram] Error: {await resp.text()}")
+                        await s.post(url, data=form, timeout=aiohttp.ClientTimeout(total=10))
             except Exception as e:
-                log.error(f"[Telegram] Gagal kirim: {e}")
+                log.error(f"[Telegram] {e}")
 
 alert_dispatcher = AlertDispatcher()
-
-# ── Broadcast Gemini ──────────────────────────────────────────────────────────
-async def broadcast_gemini_report():
-    if not app_state.clients:
-        return
-    report = app_state.gemini_report.copy()
-    if app_state.yolo_danger and "BAHAYA" not in report["status"].upper():
-        report["status"] = "BAHAYA KRITIS (Override Visi AI)"
-        report["narasi"] = "[Sistem Visi Mendeteksi Konflik]: " + report["narasi"]
-
-    msg = json.dumps(report)
-
-    async def send_to(ws: WebSocket):
-        try:
-            await ws.send_text(msg)
-        except:
-            return ws
-        return None
-
-    results      = await asyncio.gather(*(send_to(ws) for ws in app_state.clients))
-    disconnected = [ws for ws in results if ws is not None]
-    for ws in disconnected:
-        if ws in app_state.clients:
-            app_state.clients.remove(ws)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # ARSITEKTUR SHARED STATE (NON-BLOCKING DROP PATTERN)
 #
-# Thread 1 - VideoReader : cap.read() + sleep(1/fps) → latest_frame
-# Thread 2 - AIWorker    : YOLO.predict(latest_frame) + .plot() → latest_annotated_frame
-# Async Generator        : ambil latest_annotated_frame → resize → JPEG 55% → yield
+# Thread 1 - VideoReader  : cap.read() + sleep(1/fps) → latest_frame
+# Thread 2 - AI Worker    : model.track() + .plot() + Stationary Logic
+#                         → latest_annotated_frame + latest_detections
+# Async Generator (MJPEG) : ambil annotated_frame → resize → JPEG → yield
+# Async Task (Gemini)     : setiap 10 detik, analisis frame → broadcast WS
 # ═══════════════════════════════════════════════════════════════════════════════
 class VideoStreamer:
-    """
-    Mengelola 2 thread independen dengan shared state (bukan Queue).
-    Thread Reader dan AI Worker TIDAK saling memblokir.
-    """
     DISPLAY_W = 640
     DISPLAY_H = 360
 
@@ -323,24 +315,25 @@ class VideoStreamer:
         self.mode        = mode
         self.yolo_model  = yolo_model
 
-        # ── Shared State ──────────────────────────────────────────
-        self.latest_frame           = None  # Frame mentah dari Reader
-        self.latest_annotated_frame = None  # Frame + bbox dari AI Worker
-        self.latest_detections      = []    # List deteksi untuk geo-fencing
+        self.latest_frame           = None
+        self.latest_annotated_frame = None
+        self.latest_detections      = []
         self.original_fps           = 25.0
         self.running                = False
 
-        # Thread-safe locks
         self._frame_lock  = threading.Lock()
         self._annot_lock  = threading.Lock()
 
         self._reader_thread = None
         self._ai_thread     = None
 
+        # ── Stationary Vehicle Tracker ────────────────────────────
+        # Format: {track_id: {"centroid": (cx, cy), "first_seen": timestamp, "last_cx": cx, "last_cy": cy}}
+        self._tracked_vehicles: Dict[int, dict] = {}
+        self._track_lock = threading.Lock()
+
     # ──────────────────────────────────────────────────────────────
     # THREAD 1: VIDEO READER
-    # Hanya membaca cap.read() dan update self.latest_frame.
-    # sleep(1/fps) menjaga playback speed MP4 tetap natural.
     # ──────────────────────────────────────────────────────────────
     def _video_reader_thread(self):
         log.info(f"[VideoReader] Mulai: {self.mode} → {self.target_url[:70]}")
@@ -353,7 +346,7 @@ class VideoStreamer:
 
         fps_raw = cap.get(cv2.CAP_PROP_FPS)
         if fps_raw and fps_raw > 0 and not math.isnan(fps_raw):
-            self.original_fps = min(fps_raw, 30.0)  # Cap at 30 FPS
+            self.original_fps = min(fps_raw, 30.0)
         log.info(f"[VideoReader] FPS: {self.original_fps}")
 
         frame_delay  = 1.0 / self.original_fps
@@ -366,7 +359,7 @@ class VideoStreamer:
             if not ret:
                 failed_reads += 1
                 if self.mode == "upload":
-                    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)  # Loop video
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                     failed_reads = 0
                     continue
                 if failed_reads > 20:
@@ -377,11 +370,9 @@ class VideoStreamer:
 
             failed_reads = 0
 
-            # Drop pattern: timpa frame lama langsung (non-blocking)
             with self._frame_lock:
-                self.latest_frame = frame
+                self.latest_frame = frame  # Non-blocking drop
 
-            # Sinkronisasi FPS hanya untuk video lokal
             if self.mode == "upload":
                 elapsed    = time.monotonic() - t_start
                 sleep_time = frame_delay - elapsed
@@ -389,91 +380,170 @@ class VideoStreamer:
                     time.sleep(sleep_time)
 
         cap.release()
-        log.info("[VideoReader] Thread selesai, cap.release() dipanggil.")
+        log.info("[VideoReader] Thread selesai.")
 
     # ──────────────────────────────────────────────────────────────
-    # THREAD 2: AI WORKER (Ultralytics Native)
-    # Menggunakan model.predict() + results[0].plot() secara langsung.
-    # TIDAK ada sleep → secepat CPU mampu (3-5 FPS AI).
+    # THREAD 2: AI WORKER (YOLO Tracking + Stationary Detection)
     # ──────────────────────────────────────────────────────────────
     def _ai_worker_thread(self):
         """
-        AI Worker Thread: Ultralytics native inference.
-        
-        3 Aturan Mutlak:
-        1. PRE-SCALE frame ke 640x480 SEBELUM predict → bbox presisi 100%
-        2. conf=0.15 → lebih sensitif untuk malam/buram
-        3. Non-blocking drop: selalu ambil frame TERBARU (bukan antrean)
+        Menggunakan model.track(persist=True, tracker='bytetrack.yaml') untuk
+        melacak kendaraan lintas frame dengan Track ID stabil.
+
+        Stationary Logic:
+          - Simpan centroid setiap Track ID saat pertama terlihat
+          - Jika centroid tidak bergerak > STATIONARY_PX_DELTA dalam STATIONARY_SECONDS
+          - → tandai kendaraan sebagai "TERJEBAK", gambar kotak MERAH TEBAL
         """
-        log.info("[AIWorker] Thread YOLO (Ultralytics Native) dimulai.")
+        log.info("[AIWorker] Thread YOLO Tracking (ByteTrack) dimulai.")
         frame_count = 0
 
         while self.running:
-            # ── Drop-Frame Mechanism: selalu ambil frame TERBARU ──────
-            # Jika AI lambat, frame lama otomatis terbuang (non-blocking)
+            # Drop-Frame: selalu ambil frame TERBARU
             with self._frame_lock:
                 if self.latest_frame is None:
                     time.sleep(0.03)
                     continue
-                frame_copy = self.latest_frame.copy()  # Drop-frame: ambil terbaru
+                frame_copy = self.latest_frame.copy()
 
             if self.yolo_model is None:
-                log.warning("[AIWorker] Model belum siap, menunggu...")
                 time.sleep(1.0)
                 continue
 
             try:
                 frame_count += 1
 
-                # ── ATURAN 1: PRE-SCALING WAJIB SEBELUM INFERENCE ────────
-                # KUNCI PRESISI: resize frame ke standar AI TERLEBIH DULU
-                # Sehingga .plot() menggambar bbox pada skala yang SAMA
-                # dengan skala inference → ZERO misalignment!
+                # ── PRE-SCALING (kunci presisi bbox) ──────────────────────
                 infer_frame = cv2.resize(frame_copy, (INFER_W, INFER_H))
 
-                # ── ATURAN 2: INFERENSI dengan conf sensitif ─────────────
-                # classes=[0,2,3,5,6,7]: Person, Car, Motorcycle, Bus, Train, Truck
-                # conf=0.15: tangkap KRL & Orang yang buram/gelap
-                # imgsz=640: YOLO internal processing size
-                # verbose=False: matikan logging per-frame
-                results = self.yolo_model.predict(
-                    infer_frame,         # Frame yang SUDAH di-pre-scale
-                    conf    = YOLO_CONF, # 0.15
-                    iou     = YOLO_IOU,
-                    classes = YOLO_CLASSES,
-                    verbose = False,
-                    imgsz   = 640,
-                )
+                # ── YOLO TRACKING (ByteTrack, persist=True) ───────────────
+                # model.track() mempertahankan Track ID lintas frame → KUNCI
+                # untuk Stationary Detection yang akurat.
+                # Jika tracker file tidak tersedia, fallback ke predict.
+                try:
+                    results = self.yolo_model.track(
+                        infer_frame,
+                        conf      = YOLO_CONF,
+                        iou       = YOLO_IOU,
+                        classes   = YOLO_CLASSES,
+                        verbose   = False,
+                        imgsz     = 640,
+                        persist   = True,      # Pertahankan ID lintas frame
+                        tracker   = "bytetrack.yaml",
+                    )
+                except Exception as tracker_err:
+                    # Fallback ke predict jika ByteTrack tidak tersedia
+                    log.warning(f"[AIWorker] ByteTrack error ({tracker_err}), fallback ke predict")
+                    results = self.yolo_model.predict(
+                        infer_frame,
+                        conf    = YOLO_CONF,
+                        iou     = YOLO_IOU,
+                        classes = YOLO_CLASSES,
+                        verbose = False,
+                        imgsz   = 640,
+                    )
 
-                # ── PLOT NATIVE: bbox dijamin menempel tepat ──────────────
-                # .plot() menggambar pada infer_frame (640x480)
-                # Karena inference juga di 640x480, koordinat 100% sinkron
-                annotated_frame = results[0].plot(
-                    line_width = 2,
-                    font_size  = 0.5,
-                )
+                # ── STATIONARY VEHICLE DETECTION ──────────────────────────
+                now         = time.time()
+                detections  = []
+                stationary_ids = set()
 
-                # Kumpulkan data deteksi untuk geo-fencing & alert
-                detections = []
                 if results[0].boxes is not None and len(results[0].boxes) > 0:
-                    for box in results[0].boxes:
+                    boxes = results[0].boxes
+                    for box in boxes:
                         cls_id   = int(box.cls[0])
                         cls_name = self.yolo_model.names.get(cls_id, str(cls_id))
                         conf_val = float(box.conf[0])
                         xyxy     = box.xyxy[0].cpu().numpy().astype(int).tolist()
+
+                        # Centroid kendaraan
+                        cx = int((xyxy[0] + xyxy[2]) / 2)
+                        cy = int((xyxy[1] + xyxy[3]) / 2)
+
+                        # Track ID dari ByteTrack (None jika pakai predict)
+                        track_id = None
+                        if box.id is not None:
+                            track_id = int(box.id[0])
+
+                        mogok = False  # Default: tidak terjebak
+
+                        # Logika stationary hanya untuk kendaraan (bukan orang/kereta)
+                        if cls_name in VEHICLE_CLASSES and track_id is not None:
+                            with self._track_lock:
+                                if track_id not in self._tracked_vehicles:
+                                    # Pertama kali terlihat
+                                    self._tracked_vehicles[track_id] = {
+                                        "cx":         cx,
+                                        "cy":         cy,
+                                        "first_seen": now,
+                                        "last_moved": now,
+                                    }
+                                else:
+                                    entry = self._tracked_vehicles[track_id]
+                                    dist  = math.sqrt(
+                                        (cx - entry["cx"]) ** 2 + (cy - entry["cy"]) ** 2
+                                    )
+
+                                    if dist > STATIONARY_PX_DELTA:
+                                        # Kendaraan bergerak → reset timer
+                                        entry["cx"]         = cx
+                                        entry["cy"]         = cy
+                                        entry["last_moved"] = now
+                                    else:
+                                        # Kendaraan tidak bergerak
+                                        diam_durasi = now - entry["last_moved"]
+                                        if diam_durasi >= STATIONARY_SECONDS:
+                                            mogok = True
+                                            stationary_ids.add(track_id)
+                                            log.warning(
+                                                f"[Stationary] ⚠️  Track ID {track_id} ({cls_name}) "
+                                                f"TERJEBAK {diam_durasi:.1f}s di ({cx},{cy})"
+                                            )
+
                         detections.append({
                             "cls":        cls_name,
                             "conf":       conf_val,
                             "xyxy":       xyxy,
-                            "orig_shape": (INFER_H, INFER_W),  # Konsisten dengan infer_frame
+                            "track_id":   track_id,
+                            "mogok":      mogok,
+                            "orig_shape": (INFER_H, INFER_W),
                         })
 
-                # Debug log setiap 30 frame atau jika ada deteksi baru
+                # Bersihkan track ID yang tidak terlihat lagi (>10 detik)
+                with self._track_lock:
+                    stale = [tid for tid, v in self._tracked_vehicles.items()
+                             if now - v.get("last_moved", 0) > 30.0]
+                    for tid in stale:
+                        del self._tracked_vehicles[tid]
+
+                # Update stationary alert global
+                app_state.stationary_alert = len(stationary_ids) > 0
+
+                # ── PLOT NATIVE + Overlay Kendaraan Terjebak ──────────────
+                # .plot() menggambar semua bbox secara otomatis
+                annotated_frame = results[0].plot(line_width=2, font_size=0.5)
+
+                # Override: gambar kotak MERAH TEBAL untuk kendaraan terjebak
+                for det in detections:
+                    if det["mogok"]:
+                        x1, y1, x2, y2 = det["xyxy"]
+                        # Kotak merah tebal
+                        cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), (0, 0, 255), 4)
+                        # Label peringatan
+                        label = f"⚠ TERJEBAK! {det['cls'].upper()}"
+                        cv2.rectangle(annotated_frame, (x1, max(0, y1 - 30)), (x1 + 200, y1), (0, 0, 200), -1)
+                        cv2.putText(annotated_frame, label, (x1 + 3, max(20, y1 - 8)),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2, cv2.LINE_AA)
+
+                # Debug log
                 if frame_count % 30 == 1 or len(detections) > 0:
-                    objs = ", ".join(f"{d['cls']}({d['conf']:.0%})" for d in detections[:6])
+                    objs = ", ".join(
+                        f"{d['cls']}(ID:{d['track_id']}{'⚠' if d['mogok'] else ''})"
+                        for d in detections[:5]
+                    )
                     log.info(f"[AIWorker] Frame #{frame_count} | {len(detections)} objek | {objs}")
 
-                # ── Simpan ke shared state (Drop Pattern) ────────────────
+                # ── Simpan ke Shared State ─────────────────────────────────
                 with self._annot_lock:
                     self.latest_annotated_frame = annotated_frame
                     self.latest_detections      = detections
@@ -495,7 +565,7 @@ class VideoStreamer:
         self._ai_thread     = threading.Thread(target=self._ai_worker_thread,    daemon=True)
         self._reader_thread.start()
         self._ai_thread.start()
-        log.info("[VideoStreamer] Reader + AI Worker threads dimulai.")
+        log.info("[VideoStreamer] Reader + AI Worker dimulai.")
 
     def stop(self):
         self.running = False
@@ -503,18 +573,15 @@ class VideoStreamer:
             self._reader_thread.join(timeout=3.0)
         if self._ai_thread and self._ai_thread.is_alive():
             self._ai_thread.join(timeout=3.0)
-        log.info("[VideoStreamer] Semua thread dihentikan.")
 
     def is_alive(self) -> bool:
         return self._reader_thread is not None and self._reader_thread.is_alive()
 
     def get_latest_frame(self):
-        """Frame mentah (untuk Gemini analysis)."""
         with self._frame_lock:
             return None if self.latest_frame is None else self.latest_frame.copy()
 
     def get_latest_annotated_frame(self):
-        """Frame dengan bounding box dari Ultralytics .plot()."""
         with self._annot_lock:
             return None if self.latest_annotated_frame is None else self.latest_annotated_frame.copy()
 
@@ -525,10 +592,9 @@ class VideoStreamer:
 
 # ── Singleton Streamer ────────────────────────────────────────────────────────
 _current_streamer: Optional[VideoStreamer] = None
-_streamer_lock    = threading.Lock()
+_streamer_lock = threading.Lock()
 
 def get_streamer() -> Optional[VideoStreamer]:
-    global _current_streamer
     with _streamer_lock:
         return _current_streamer
 
@@ -542,18 +608,16 @@ def set_streamer(new_streamer: Optional[VideoStreamer]):
 
 # ── Management Loop ───────────────────────────────────────────────────────────
 async def yolo_inference_loop():
-    """Memantau perubahan source video dan mengelola lifecycle VideoStreamer."""
-    log.info("[Manager] Memuat model YOLO (Ultralytics Native)...")
+    """
+    Async background task: Memuat model YOLO, memantau perubahan source video,
+    dan mengelola lifecycle VideoStreamer.
+    """
+    log.info("[Manager] Memuat model YOLO...")
     app_state.yolo_model = load_yolo_model()
+    app_state.running    = True
 
-    if app_state.yolo_model is None:
-        log.error("[Manager] Model gagal dimuat! Stream AI tidak akan berjalan.")
-    else:
-        log.info("[Manager] Model YOLO siap.")
-
-    app_state.running  = True
-    current_mode       = None
-    current_target     = None
+    current_mode   = None
+    current_target = None
 
     while app_state.running:
         mode   = app_state.source_mode
@@ -565,73 +629,221 @@ async def yolo_inference_loop():
             current_mode   = mode
             current_target = target
             resolved_url   = target
+
+            if mode == "youtube":
+                url_result = await extract_youtube_url_async(target)
+                if url_result in ("TIMEOUT", "ERROR", None):
+                    log.error(f"[Manager] Gagal ekstrak YouTube URL: {url_result}")
+                    await asyncio.sleep(5)
+                    current_mode = None
+                    continue
+                resolved_url = url_result
+
+            new_streamer = VideoStreamer(resolved_url, mode, app_state.yolo_model)
+            new_streamer.start()
+            set_streamer(new_streamer)
+            log.info(f"[Manager] VideoStreamer aktif: {mode} ({resolved_url[:60]})")
+
+        # Danger zone check
+        streamer = get_streamer()
+        if streamer and streamer.is_alive():
+            dets = streamer.get_latest_detections()
+            app_state.yolo_danger = app_state.stationary_alert or any(
+                d['cls'] in ('train',) for d in dets
+            )
+
+        await asyncio.sleep(1.0)
+
+    set_streamer(None)
+
+
+# ── Gemini Background Task ────────────────────────────────────────────────────
+async def gemini_analysis_loop():
+    """
+    Async Background Task — Independen dari loop video.
+    Setiap GEMINI_INTERVAL detik:
+      1. Ambil frame terbaru dari streamer
+      2. Kirim ke Gemini 2.0 Flash untuk analisis
+      3. BROADCAST hasil JSON ke SEMUA WebSocket clients → menghidupkan panel Gemini
+    """
+    log.info("[Gemini] Background Task dimulai (interval=10s)")
+
+    # Import Gemini
+    try:
+        from google import genai
+        from google.genai import types
+        gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+        log.info("[Gemini] Client berhasil diinisialisasi.")
+    except Exception as e:
+        log.error(f"[Gemini] Gagal init client: {e}")
+        gemini_client = None
+
+    PROMPT = (
+        "Kamu adalah sistem AI analisis perlintasan kereta api di Indonesia. "
+        "Analisis frame ini dari rekaman kamera CCTV perlintasan kereta. "
+        "Berikan: (1) nama lokasi yang kamu tebak berdasarkan ciri visual, "
+        "(2) status kondisi: AMAN atau BAHAYA, "
+        "(3) narasi situasi lalu lintas dalam 2-3 kalimat Bahasa Indonesia. "
+        "Kembalikan HANYA JSON dengan format: "
+        '{"status":"AMAN|BAHAYA","lokasi":"nama lokasi","narasi":"deskripsi"}'
+    )
+
+    backoff = 10
+
+    while app_state.running:
+        await asyncio.sleep(GEMINI_INTERVAL)
+
+        # ── Ambil frame terbaru ───────────────────────────────────
+        streamer    = get_streamer()
+        frame_to_analyze = None
+
+        if streamer and streamer.is_alive():
+            frame_to_analyze = streamer.get_latest_frame()
+
+        if frame_to_analyze is None:
+            log.debug("[Gemini] Belum ada frame, skip siklus ini.")
+            continue
+
+        # ── Kirim ke Gemini API ───────────────────────────────────
+        if gemini_client is None:
+            log.warning("[Gemini] Client tidak tersedia, skip.")
+            continue
+
+        try:
+            # Encode frame ke JPEG untuk dikirim ke Gemini
+            success, buf = cv2.imencode(".jpg", frame_to_analyze, [cv2.IMWRITE_JPEG_QUALITY, 75])
+            if not success:
+                continue
+
+            def call_gemini_api():
+                from google.genai import types as _types
+                return gemini_client.models.generate_content(
+                    model    = "gemini-2.0-flash",
+                    contents = [
+                        _types.Part.from_bytes(data=buf.tobytes(), mime_type="image/jpeg"),
+                        PROMPT
+                    ],
+                    config   = _types.GenerateContentConfig(
+                        response_mime_type = "application/json",
+                        temperature        = 0.2,
+                        max_output_tokens  = 256,
+                    )
+                )
+
+            response = await asyncio.wait_for(
+                asyncio.to_thread(call_gemini_api),
+                timeout=25.0
+            )
+
+            raw_text = response.text.strip()
+            log.info(f"[Gemini] Response: {raw_text[:120]}")
+
+            # Parse JSON
+            try:
+                parsed = json.loads(raw_text)
+            except json.JSONDecodeError:
+                # Coba ekstrak JSON dari teks jika ada markdown
+                import re
+                match = re.search(r'\{.*\}', raw_text, re.DOTALL)
+                if match:
+                    parsed = json.loads(match.group())
+                else:
+                    raise ValueError("Response bukan JSON valid")
+
+            report = {
+                "status":    str(parsed.get("status", "AMAN")),
+                "lokasi":    str(parsed.get("lokasi", "Tidak dikenali")),
+                "narasi":    str(parsed.get("narasi", "Tidak ada narasi.")),
+                "timestamp": time.time(),
+            }
+
+            # ── Override jika ada kendaraan terjebak ──────────────
+            if app_state.stationary_alert:
+                report["status"] = "⚠️ BAHAYA: KENDARAAN TERJEBAK"
+                report["narasi"] = (
+                    "AI mendeteksi kendaraan yang tidak bergerak di area perlintasan. "
+                    + report["narasi"]
+                )
+
+            # Simpan laporan terbaru
+            app_state.gemini_report = report
+
+            # ── BROADCAST KE SEMUA WEBSOCKET CLIENTS ──────────────
+            # Ini adalah kunci menghidupkan panel Gemini di frontend!
+            await broadcast_ws(report)
+
+            backoff = 10  # Reset backoff setelah sukses
+
+        except asyncio.TimeoutError:
+            log.error("[Gemini] Timeout >25s")
+            app_state.gemini_report["narasi"] = "Koneksi ke Gemini AI timeout. Mencoba lagi..."
+            await broadcast_ws(app_state.gemini_report)
+
+        except Exception as e:
+            err_msg = str(e)
+            log.error(f"[Gemini] Error: {err_msg}")
+
+            if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
+                log.warning(f"[Gemini] Rate limit, backoff {backoff}s")
+                app_state.gemini_report["narasi"] = f"Gemini API rate limit. Coba lagi dalam {backoff}s."
+                await broadcast_ws(app_state.gemini_report)
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 120)
+            elif "INVALID_API_KEY" in err_msg or "401" in err_msg:
+                log.error("[Gemini] API Key tidak valid!")
+                app_state.gemini_report["narasi"] = "Error: Gemini API Key tidak valid."
+                await broadcast_ws(app_state.gemini_report)
+            else:
+                app_state.gemini_report["narasi"] = f"Error analisis AI: {err_msg[:60]}"
+                await broadcast_ws(app_state.gemini_report)
+
+
 # ── MJPEG Async Generator ─────────────────────────────────────────────────────
 async def generate_mjpeg_stream():
     """
     Async MJPEG Generator — Strict 30 FPS Pacing.
-
-    Pipeline:
-      1. Ambil latest_annotated_frame (bbox SUDAH tergambar oleh .plot())
-      2. Resize ringan: 640x480 → 640x360 (crop letterbox atas-bawah)
-      3. Tambah overlay tipis (jumlah objek + timestamp)
-      4. Encode JPEG 60%
-      5. yield dengan strict asyncio.sleep(0.033) → metronom 30 FPS konstan
-
-    TIDAK ada manual cv2.rectangle di sini.
-    Drop-frame otomatis: selalu ambil frame TERBARU dari shared state.
+    Mengambil annotated_frame (bbox dari .plot() + overlay terjebak) dari
+    shared state dan melakukan yield ke browser.
     """
-    DISPLAY_W = 640
-    DISPLAY_H = 360
-    TARGET_FPS_DELAY = 0.033  # 1/30 detik = ~30 FPS konstan
+    DISPLAY_W        = 640
+    DISPLAY_H        = 360
+    TARGET_FPS_DELAY = 0.033  # 30 FPS
 
-    # Frame inisialisasi
-    init_f   = generate_text_frame("NusaRail Vision System v5\nMenginisialisasi AI Engine...",
-                                   bg_color=(10, 15, 30))
+    init_f   = generate_text_frame("NusaRail Vision System v6\nMemuat AI Engine...", bg_color=(10, 15, 30))
     ret, buf = cv2.imencode('.jpg', init_f, [cv2.IMWRITE_JPEG_QUALITY, 60])
     if ret:
         yield b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + buf.tobytes() + b'\r\n'
 
     while app_state.running:
-        # ── Metronom: catat waktu mulai setiap siklus ─────────────
-        t_loop_start = asyncio.get_event_loop().time()
-
+        t_start  = asyncio.get_event_loop().time()
         streamer = get_streamer()
 
-        # ── Tidak ada streamer aktif ──────────────────────────────
         if streamer is None or not streamer.is_alive():
-            wait_f   = generate_text_frame("Menghubungkan ke sumber video...",
-                                           bg_color=(15, 20, 40))
+            wait_f   = generate_text_frame("Menghubungkan ke sumber video...", bg_color=(15, 20, 40))
             ret, buf = cv2.imencode('.jpg', wait_f, [cv2.IMWRITE_JPEG_QUALITY, 60])
             if ret:
                 yield b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + buf.tobytes() + b'\r\n'
             await asyncio.sleep(TARGET_FPS_DELAY)
             continue
 
-        # ── Ambil frame yang SUDAH dianotasi oleh .plot() ─────────
-        # Drop-frame: get_latest_annotated_frame() selalu mengembalikan TERBARU
+        # Prioritaskan annotated frame (dengan bbox + overlay terjebak)
         frame = streamer.get_latest_annotated_frame()
 
         if frame is None:
-            # AI Worker belum selesai inference pertama → tampilkan frame mentah
             frame = streamer.get_latest_frame()
             if frame is None:
-                # Belum ada frame sama sekali → skip, tunggu
-                sleep_remaining = TARGET_FPS_DELAY - (asyncio.get_event_loop().time() - t_loop_start)
-                await asyncio.sleep(max(0, sleep_remaining))
+                elapsed = asyncio.get_event_loop().time() - t_start
+                await asyncio.sleep(max(0, TARGET_FPS_DELAY - elapsed))
                 continue
             cv2.putText(frame, "AI warming up...", (10, 35),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 220, 255), 2, cv2.LINE_AA)
 
-        # ── Resize: 640x480 (AI output) → 640x360 (display) ─────
-        # Crop 60px atas-bawah (letterbox crop) agar rasio 16:9
-        # Ini BUKAN resize ulang bbox! Bbox sudah tergambar sebagai pixel.
-        h_src, w_src = frame.shape[:2]
-        if h_src != DISPLAY_H or w_src != DISPLAY_W:
+        # Resize ke display 640x360
+        if frame.shape[:2] != (DISPLAY_H, DISPLAY_W):
             frame = cv2.resize(frame, (DISPLAY_W, DISPLAY_H))
-
         H, W = DISPLAY_H, DISPLAY_W
 
-        # ── Geo-Fence Overlay (jika ada polygon) ──────────────────
+        # Geo-Fence Overlay
         if len(app_state.polygon_points) >= 3:
             pts = [[int(pt['x'] * W), int(pt['y'] * H)] for pt in app_state.polygon_points]
             pts = np.array(pts, np.int32)
@@ -642,197 +854,105 @@ async def generate_mjpeg_stream():
             cv2.putText(frame, "DANGER ZONE", tuple(pts[0]),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2, cv2.LINE_AA)
 
-        # ── Info Overlay: jumlah objek & timestamp ────────────────
+        # ── Info Overlay ──────────────────────────────────────────
         det_count  = len(streamer.get_latest_detections())
-        info_color = (0, 255, 100) if det_count > 0 else (160, 160, 160)
         ts         = time.strftime("%Y-%m-%d %H:%M:%S")
 
-        # Background gelap untuk keterbacaan
-        cv2.rectangle(frame, (0, 0), (190, 32), (0, 0, 0), -1)
-        cv2.putText(frame, f"AI: {det_count} objek terdeteksi", (6, 22),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.52, info_color, 1, cv2.LINE_AA)
+        # Banner merah jika ada kendaraan terjebak
+        if app_state.stationary_alert:
+            cv2.rectangle(frame, (0, 0), (DISPLAY_W, 36), (0, 0, 180), -1)
+            cv2.putText(frame, "⚠ BAHAYA: KENDARAAN TERJEBAK DI REL!", (6, 24),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2, cv2.LINE_AA)
+        else:
+            cv2.rectangle(frame, (0, 0), (200, 32), (0, 0, 0), -1)
+            info_color = (0, 255, 100) if det_count > 0 else (160, 160, 160)
+            cv2.putText(frame, f"AI: {det_count} objek terdeteksi", (6, 22),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.52, info_color, 1, cv2.LINE_AA)
 
         cv2.putText(frame, f"NusaRail | {ts}", (5, H - 8),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 0, 0), 3, cv2.LINE_AA)
         cv2.putText(frame, f"NusaRail | {ts}", (5, H - 8),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.42, (255, 255, 255), 1, cv2.LINE_AA)
 
-        # ── Encode JPEG & yield ───────────────────────────────────
+        # Encode JPEG & yield
         ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 60])
         if ret:
             yield b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n'
 
-        # ── ATURAN 3: STRICT FRAME PACING (Anti-Choppy) ───────────
-        # Hitung sisa waktu yang diperlukan untuk mencapai target 30 FPS.
-        # Jika render + encode < 33ms, tidur sisa waktunya.
-        # Jika > 33ms (AI lambat), langsung lanjut (drop frame lama).
-        elapsed       = asyncio.get_event_loop().time() - t_loop_start
-        sleep_needed  = TARGET_FPS_DELAY - elapsed
-        await asyncio.sleep(max(0.001, sleep_needed))  # Minimum 1ms yield ke event loop
-
-
-
-# ── Gemini Analysis Loop ──────────────────────────────────────────────────────
-async def gemini_analysis_loop():
-    log.info("[Gemini] Analysis Loop started")
-    from google import genai
-    from google.genai import types
-    from pydantic import BaseModel as PM, Field
-
-    class GeminiSchema(PM):
-        status: str = Field(description="Aman atau BAHAYA")
-        lokasi: str = Field(description="Nama lokasi perlintasan")
-        narasi: str = Field(description="Laporan analisis situasi")
-        rawan_injeksi: bool = Field(description="False")
-
-    client  = None
-    backoff = 10
-    try:
-        client = genai.Client(api_key=GEMINI_API_KEY)
-    except Exception as e:
-        log.error(f"[Gemini] Gagal init: {e}")
-
-    prompt = (
-        "Analisis gambar rekaman perlintasan kereta ini secara teliti. "
-        "Deteksi kondisi bahaya: kendaraan mogok di rel, orang di jalur kereta. "
-        "Kembalikan data sesuai skema JSON."
-    )
-
-    while app_state.running:
-        streamer = get_streamer()
-        frame_to_process = None
-        if streamer and streamer.is_alive():
-            frame_to_process = streamer.get_latest_frame()
-        else:
-            async with app_state.frame_lock:
-                if app_state.last_frame is not None:
-                    frame_to_process = app_state.last_frame.copy()
-
-        if client and frame_to_process is not None:
-            try:
-                success, buf = cv2.imencode(".jpg", frame_to_process, [cv2.IMWRITE_JPEG_QUALITY, 70])
-                if success:
-                    def call_gemini():
-                        return client.models.generate_content(
-                            model="gemini-2.0-flash",
-                            contents=[
-                                types.Part.from_bytes(data=buf.tobytes(), mime_type="image/jpeg"),
-                                prompt
-                            ],
-                            config=types.GenerateContentConfig(
-                                response_mime_type="application/json",
-                                response_schema=GeminiSchema,
-                                temperature=0.1
-                            )
-                        )
-
-                    response = await asyncio.wait_for(asyncio.to_thread(call_gemini), timeout=30.0)
-                    text     = response.text.strip()
-                    try:
-                        parsed = json.loads(text)
-                        app_state.gemini_report = {
-                            "status":    parsed.get("status", "AMAN"),
-                            "lokasi":    parsed.get("lokasi", "Unknown"),
-                            "narasi":    parsed.get("narasi", ""),
-                            "timestamp": time.time()
-                        }
-                    except json.JSONDecodeError:
-                        app_state.gemini_report["narasi"] = "Error parsing JSON dari AI."
-
-                    backoff = 10
-                    await broadcast_gemini_report()
-
-            except asyncio.TimeoutError:
-                log.error("[Gemini] Timeout >30s")
-                app_state.gemini_report["narasi"] = "Koneksi ke AI Cloud timeout."
-            except Exception as e:
-                err = str(e)
-                log.error(f"[Gemini] Error: {e}")
-                if "429" in err or "RESOURCE_EXHAUSTED" in err:
-                    await asyncio.sleep(backoff)
-                    backoff = min(backoff * 2, 120)
-
-        await asyncio.sleep(GEMINI_INTERVAL)
+        # Strict 30 FPS pacing
+        elapsed = asyncio.get_event_loop().time() - t_start
+        await asyncio.sleep(max(0.001, TARGET_FPS_DELAY - elapsed))
 
 
 # ── FastAPI Startup ───────────────────────────────────────────────────────────
 os.makedirs("temp", exist_ok=True)
 os.makedirs("temp_snapshots", exist_ok=True)
-
 app.mount("/snapshots", StaticFiles(directory="temp_snapshots"), name="snapshots")
 
 @app.on_event("startup")
 async def startup_event():
-    asyncio.create_task(yolo_inference_loop())
-    asyncio.create_task(gemini_analysis_loop())
+    asyncio.create_task(yolo_inference_loop())    # Task 1: Model + VideoStreamer
+    asyncio.create_task(gemini_analysis_loop())   # Task 2: Gemini + WS Broadcast
 
 @app.on_event("shutdown")
 async def shutdown_event():
     app_state.running = False
 
-# ── Endpoints ─────────────────────────────────────────────────────────────────
+# ── REST Endpoints ────────────────────────────────────────────────────────────
 @app.get("/api/health")
 def health_check():
     streamer = get_streamer()
     return {
-        "status":         "ok",
-        "running":        app_state.running,
-        "model_loaded":   app_state.yolo_model is not None,
-        "streamer_alive": streamer is not None and streamer.is_alive(),
-        "djka_connected": True,
-        "mqtt_connected": alert_dispatcher.mqtt_client.is_connected(),
+        "status":          "ok",
+        "running":         app_state.running,
+        "model_loaded":    app_state.yolo_model is not None,
+        "streamer_alive":  streamer is not None and streamer.is_alive(),
+        "stationary_alert": app_state.stationary_alert,
+        "djka_connected":  True,
+        "mqtt_connected":  alert_dispatcher.mqtt_client.is_connected(),
     }
 
 @app.get("/api/debug/model")
 def debug_model():
-    """Diagnosa model YOLO yang aktif."""
     model = app_state.yolo_model
     if model is None:
         return {"status": "ERROR", "message": "Model belum dimuat."}
-    try:
-        names = model.names if hasattr(model, 'names') else {}
-        target_names = {str(i): names.get(i, "N/A") for i in YOLO_CLASSES}
-        return {
-            "status":           "OK",
-            "model_type":       str(type(model).__name__),
-            "total_classes":    len(names),
-            "target_classes":   target_names,
-            "conf_threshold":   YOLO_CONF,
-            "iou_threshold":    YOLO_IOU,
-            "classes_filter":   YOLO_CLASSES,
-            "last_detections":  len(app_state.last_detections),
-            "active_objects":   app_state.active_objects_count,
-            "streamer_alive":   get_streamer() is not None and get_streamer().is_alive(),
-            "class_check":      "✅ COCO 80 kelas" if len(names) >= 80 else f"⚠️ Hanya {len(names)} kelas",
-        }
-    except Exception as e:
-        return {"status": "ERROR", "error": str(e)}
+    names        = model.names if hasattr(model, 'names') else {}
+    target_names = {str(i): names.get(i, "N/A") for i in YOLO_CLASSES}
+    return {
+        "status":           "OK",
+        "total_classes":    len(names),
+        "target_classes":   target_names,
+        "conf_threshold":   YOLO_CONF,
+        "tracking":         "ByteTrack (persist=True)",
+        "stationary_secs":  STATIONARY_SECONDS,
+        "stationary_px":    STATIONARY_PX_DELTA,
+        "active_objects":   app_state.active_objects_count,
+        "stationary_alert": app_state.stationary_alert,
+        "ws_clients":       len(app_state.clients),
+        "class_check":      "✅ COCO 80 kelas" if len(names) >= 80 else f"⚠️ {len(names)} kelas",
+    }
 
 class SetUrlRequest(BaseModel):
-    youtube_url: str   = None
-    rtsp_url: str      = None
-    mode: str          = "youtube"
+    youtube_url: str = None
+    rtsp_url: str    = None
+    mode: str        = "youtube"
 
 @app.post("/api/set_url")
 def set_url(req: SetUrlRequest):
     if req.mode == "youtube" and req.youtube_url:
-        url = req.youtube_url.strip()
-        if not url.startswith("http"):
-            url = "https://www.youtube.com/watch?v=q7lvnYVuqNY"
-        app_state.target_url  = url
+        app_state.target_url  = req.youtube_url.strip()
         app_state.source_mode = "youtube"
     elif req.mode == "rtsp" and req.rtsp_url:
         app_state.target_url  = req.rtsp_url
         app_state.source_mode = "rtsp"
-    return {"status": "success", "mode": app_state.source_mode, "target_url": app_state.target_url}
+    return {"status": "success", "mode": app_state.source_mode}
 
 @app.post("/api/upload")
 async def upload_video(file: UploadFile = File(...)):
     for old in Path("temp").glob("*.*"):
-        try:
-            os.remove(old)
-        except:
-            pass
+        try: os.remove(old)
+        except: pass
     file_path = f"temp/{file.filename}"
     with open(file_path, "wb") as buf:
         shutil.copyfileobj(file.file, buf)
@@ -855,12 +975,13 @@ class PolygonPointRequest(BaseModel):
     y: float
 
 class SetPolygonRequest(BaseModel):
-    points: List[PolygonPointRequest]
+    points: list
 
 @app.post("/api/set_polygon")
 def set_polygon(req: SetPolygonRequest):
-    app_state.polygon_points = [{"x": p.x, "y": p.y} for p in req.points]
-    return {"status": "success", "points_count": len(app_state.polygon_points)}
+    app_state.polygon_points = req.points if isinstance(req.points[0], dict) else \
+        [{"x": p.x, "y": p.y} for p in req.points]
+    return {"status": "success"}
 
 class SetIntegrationRequest(BaseModel):
     djka_webhook: str
@@ -874,7 +995,7 @@ def set_integrations(req: SetIntegrationRequest):
         alert_dispatcher.mqtt_client.disconnect()
         alert_dispatcher.mqtt_client.connect(app_state.mqtt_broker, 1883, 60)
     except Exception as e:
-        log.error(f"[MQTT] Reconnect Error: {e}")
+        log.error(f"[MQTT] {e}")
     return {"status": "success"}
 
 @app.get("/api/incidents")
@@ -882,7 +1003,7 @@ def get_incidents():
     try:
         conn = sqlite3.connect("incidents.db")
         conn.row_factory = sqlite3.Row
-        c    = conn.cursor()
+        c = conn.cursor()
         c.execute("SELECT * FROM incidents ORDER BY timestamp DESC LIMIT 50")
         rows = c.fetchall()
         conn.close()
@@ -894,32 +1015,30 @@ def get_incidents():
 def get_status():
     return {
         "danger":          app_state.yolo_danger,
+        "stationary_alert": app_state.stationary_alert,
         "uptime":          int(time.time() - app_state.start_time),
         "active_objects":  app_state.active_objects_count,
     }
 
 @app.get("/api/export_csv")
 def export_csv():
+    import io as _io, csv as _csv
+    from fastapi.responses import Response
     try:
         conn = sqlite3.connect("incidents.db")
         c    = conn.cursor()
         c.execute("SELECT timestamp, lokasi, jenis, snapshot_url FROM incidents ORDER BY timestamp DESC")
         rows = c.fetchall()
         conn.close()
-
-        import io as _io, csv as _csv
-        output = _io.StringIO()
-        writer = _csv.writer(output)
-        writer.writerow(["Timestamp", "Lokasi", "Jenis Insiden", "Snapshot URL"])
-        for row in rows:
-            ts_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(row[0]))
-            writer.writerow([ts_str, row[1], row[2], row[3]])
-
-        from fastapi.responses import Response
+        out = _io.StringIO()
+        w   = _csv.writer(out)
+        w.writerow(["Timestamp", "Lokasi", "Jenis", "Snapshot URL"])
+        for r in rows:
+            w.writerow([time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(r[0])), r[1], r[2], r[3]])
         return Response(
-            content     = output.getvalue(),
-            media_type  = "text/csv",
-            headers     = {"Content-Disposition": "attachment; filename=nusarail_incidents.csv"}
+            content    = out.getvalue(),
+            media_type = "text/csv",
+            headers    = {"Content-Disposition": "attachment; filename=nusarail_incidents.csv"}
         )
     except Exception as e:
         return {"error": str(e)}
@@ -931,14 +1050,31 @@ async def video_stream():
         media_type="multipart/x-mixed-replace; boundary=frame"
     )
 
+# ── WebSocket Endpoint ────────────────────────────────────────────────────────
 @app.websocket("/api/ws/gemini")
 async def websocket_endpoint(websocket: WebSocket):
+    """
+    WebSocket endpoint untuk push analisis Gemini ke frontend secara real-time.
+    Saat client connect: langsung kirim laporan terakhir yang tersimpan.
+    Setelah itu: gemini_analysis_loop() yang akan broadcast setiap 10 detik.
+    """
     await websocket.accept()
     app_state.clients.append(websocket)
+    log.info(f"[WS] Client terhubung. Total: {len(app_state.clients)}")
+
+    # Kirim laporan terakhir langsung saat connect (bukan nunggu 10 detik)
     try:
-        await websocket.send_text(json.dumps(app_state.gemini_report))
+        initial_report = app_state.gemini_report.copy()
+        initial_report["timestamp"] = initial_report.get("timestamp", time.time())
+        await websocket.send_text(json.dumps(initial_report, ensure_ascii=False))
+    except:
+        pass
+
+    try:
         while True:
+            # Keep-alive: terima ping dari client
             await websocket.receive_text()
     except WebSocketDisconnect:
         if websocket in app_state.clients:
             app_state.clients.remove(websocket)
+        log.info(f"[WS] Client disconnect. Sisa: {len(app_state.clients)}")
