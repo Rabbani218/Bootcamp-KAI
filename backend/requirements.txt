@@ -4,19 +4,20 @@ uvicorn[standard]==0.24.0
 pydantic==2.5.0
 websockets>=11.0.3
 
-# AI/ML - YOLOv8 & Computer Vision
-ultralytics==8.0.227
-onnxruntime>=1.16.1
+# AI/ML - YOLOv8 Ultralytics (Native .predict() + .plot())
+ultralytics>=8.1.0
 opencv-python-headless==4.8.1.78
-numpy==1.24.3
-Pillow==10.1.0
+numpy>=1.24.3
+Pillow>=10.1.0
+torch>=2.0.0
+torchvision>=0.15.0
 
 # Async & Utility
 python-multipart==0.0.6
 aiofiles==23.2.1
 yt-dlp>=2024.5.0
 
-# Async HTTP (Ollama LLM client)
+# Async HTTP
 httpx==0.26.0
 
 # Gemini Vision
