@@ -422,7 +422,7 @@ class VideoStreamer:
                 # Jika tracker file tidak tersedia, fallback ke predict.
                 try:
                     results = self.yolo_model.track(
-                        infer_frame,
+                        source    = infer_frame,
                         conf      = YOLO_CONF,
                         iou       = YOLO_IOU,
                         classes   = YOLO_CLASSES,
@@ -435,7 +435,7 @@ class VideoStreamer:
                     # Fallback ke predict jika ByteTrack tidak tersedia
                     log.warning(f"[AIWorker] ByteTrack error ({tracker_err}), fallback ke predict")
                     results = self.yolo_model.predict(
-                        infer_frame,
+                        source  = infer_frame,
                         conf    = YOLO_CONF,
                         iou     = YOLO_IOU,
                         classes = YOLO_CLASSES,
@@ -454,7 +454,7 @@ class VideoStreamer:
                         cls_id   = int(box.cls[0])
                         cls_name = self.yolo_model.names.get(cls_id, str(cls_id))
                         conf_val = float(box.conf[0])
-                        xyxy     = box.xyxy[0].cpu().numpy().astype(int).tolist()
+                        xyxy     = [int(v) for v in box.xyxy[0].cpu().tolist()]
 
                         # Centroid kendaraan
                         cx = int((xyxy[0] + xyxy[2]) / 2)
