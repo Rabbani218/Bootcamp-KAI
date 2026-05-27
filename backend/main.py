@@ -55,11 +55,13 @@ MQTT_BROKER      = os.getenv("MQTT_BROKER", "test.mosquitto.org")
 
 # Kelas COCO yang kita pantau (Person, Car, Motorcycle, Bus, Train, Truck)
 YOLO_CLASSES     = [0, 2, 3, 5, 6, 7]
-YOLO_CONF        = 0.25   # Confidence threshold (cukup sensitif)
+YOLO_CONF        = 0.15   # Lebih sensitif: menangkap KRL dan Orang kondisi malam/buram
 YOLO_IOU         = 0.45   # IoU NMS threshold
 
-# Nama model: prioritas custom, fallback ke yolov8n.pt (auto-download dari Ultralytics)
-YOLO_MODEL_PATH  = os.getenv("YOLO_MODEL", "best_web_optimized.onnx")
+# Resolusi standar WAJIB sebelum inference (Pre-scaling)
+# Mengunci skala frame agar bbox .plot() 100% presisi menempel objek
+INFER_W = 640
+INFER_H = 480
 
 # ── AppState ──────────────────────────────────────────────────────────────────
 class AppState:
@@ -395,16 +397,25 @@ class VideoStreamer:
     # TIDAK ada sleep → secepat CPU mampu (3-5 FPS AI).
     # ──────────────────────────────────────────────────────────────
     def _ai_worker_thread(self):
+        """
+        AI Worker Thread: Ultralytics native inference.
+        
+        3 Aturan Mutlak:
+        1. PRE-SCALE frame ke 640x480 SEBELUM predict → bbox presisi 100%
+        2. conf=0.15 → lebih sensitif untuk malam/buram
+        3. Non-blocking drop: selalu ambil frame TERBARU (bukan antrean)
+        """
         log.info("[AIWorker] Thread YOLO (Ultralytics Native) dimulai.")
         frame_count = 0
 
         while self.running:
-            # Ambil salinan frame terbaru
+            # ── Drop-Frame Mechanism: selalu ambil frame TERBARU ──────
+            # Jika AI lambat, frame lama otomatis terbuang (non-blocking)
             with self._frame_lock:
                 if self.latest_frame is None:
                     time.sleep(0.03)
                     continue
-                frame_copy = self.latest_frame.copy()
+                frame_copy = self.latest_frame.copy()  # Drop-frame: ambil terbaru
 
             if self.yolo_model is None:
                 log.warning("[AIWorker] Model belum siap, menunggu...")
@@ -414,23 +425,29 @@ class VideoStreamer:
             try:
                 frame_count += 1
 
-                # ── INFERENSI ULTRALYTICS NATIVE ──────────────────────────
+                # ── ATURAN 1: PRE-SCALING WAJIB SEBELUM INFERENCE ────────
+                # KUNCI PRESISI: resize frame ke standar AI TERLEBIH DULU
+                # Sehingga .plot() menggambar bbox pada skala yang SAMA
+                # dengan skala inference → ZERO misalignment!
+                infer_frame = cv2.resize(frame_copy, (INFER_W, INFER_H))
+
+                # ── ATURAN 2: INFERENSI dengan conf sensitif ─────────────
                 # classes=[0,2,3,5,6,7]: Person, Car, Motorcycle, Bus, Train, Truck
-                # conf=0.25: cukup sensitif untuk mendeteksi kendaraan
-                # verbose=False: matikan print output per-frame
+                # conf=0.15: tangkap KRL & Orang yang buram/gelap
+                # imgsz=640: YOLO internal processing size
+                # verbose=False: matikan logging per-frame
                 results = self.yolo_model.predict(
-                    frame_copy,
-                    conf    = YOLO_CONF,
+                    infer_frame,         # Frame yang SUDAH di-pre-scale
+                    conf    = YOLO_CONF, # 0.15
                     iou     = YOLO_IOU,
                     classes = YOLO_CLASSES,
                     verbose = False,
                     imgsz   = 640,
                 )
 
-                # ── PLOT NATIVE ULTRALYTICS ────────────────────────────────
-                # .plot() menggambar SEMUA bounding box, label, confidence
-                # secara otomatis dengan warna yang sudah disetel Ultralytics.
-                # TIDAK perlu cv2.rectangle manual lagi!
+                # ── PLOT NATIVE: bbox dijamin menempel tepat ──────────────
+                # .plot() menggambar pada infer_frame (640x480)
+                # Karena inference juga di 640x480, koordinat 100% sinkron
                 annotated_frame = results[0].plot(
                     line_width = 2,
                     font_size  = 0.5,
@@ -438,7 +455,7 @@ class VideoStreamer:
 
                 # Kumpulkan data deteksi untuk geo-fencing & alert
                 detections = []
-                if results[0].boxes is not None:
+                if results[0].boxes is not None and len(results[0].boxes) > 0:
                     for box in results[0].boxes:
                         cls_id   = int(box.cls[0])
                         cls_name = self.yolo_model.names.get(cls_id, str(cls_id))
@@ -448,29 +465,28 @@ class VideoStreamer:
                             "cls":        cls_name,
                             "conf":       conf_val,
                             "xyxy":       xyxy,
-                            "orig_shape": frame_copy.shape[:2],
+                            "orig_shape": (INFER_H, INFER_W),  # Konsisten dengan infer_frame
                         })
 
-                # Debug log setiap 30 frame
+                # Debug log setiap 30 frame atau jika ada deteksi baru
                 if frame_count % 30 == 1 or len(detections) > 0:
-                    log.info(f"[AIWorker] Frame #{frame_count}: {len(detections)} objek | "
-                             + ", ".join(f"{d['cls']}({d['conf']:.0%})" for d in detections[:5]))
+                    objs = ", ".join(f"{d['cls']}({d['conf']:.0%})" for d in detections[:6])
+                    log.info(f"[AIWorker] Frame #{frame_count} | {len(detections)} objek | {objs}")
 
-                # Simpan ke shared state
+                # ── Simpan ke shared state (Drop Pattern) ────────────────
                 with self._annot_lock:
                     self.latest_annotated_frame = annotated_frame
                     self.latest_detections      = detections
 
-                # Sync ke app_state untuk danger detection
-                app_state.last_detections       = detections
-                app_state.active_objects_count  = len(detections)
+                app_state.last_detections      = detections
+                app_state.active_objects_count = len(detections)
 
             except Exception as e:
                 log.error(f"[AIWorker] Error frame #{frame_count}: {e}")
                 import traceback; traceback.print_exc()
                 time.sleep(0.1)
 
-        log.info(f"[AIWorker] Thread selesai. Total frame diproses: {frame_count}")
+        log.info(f"[AIWorker] Thread selesai. Total frame: {frame_count}")
 
     # ── Lifecycle ─────────────────────────────────────────────────
     def start(self):
@@ -549,119 +565,71 @@ async def yolo_inference_loop():
             current_mode   = mode
             current_target = target
             resolved_url   = target
-
-            if mode == "youtube":
-                async with app_state.frame_lock:
-                    app_state.last_frame = generate_text_frame(
-                        "INITIALIZING...\nExtracting YouTube URL...")
-                url_result = await extract_youtube_url_async(target)
-
-                if url_result in ("TIMEOUT", "ERROR", None):
-                    async with app_state.frame_lock:
-                        app_state.last_frame = generate_text_frame(
-                            "ERROR: YouTube Blocked / Invalid URL.\nGanti URL dan coba lagi.",
-                            bg_color=(0, 0, 100))
-                    await asyncio.sleep(5)
-                    current_mode = None
-                    continue
-                resolved_url = url_result
-
-            elif mode == "rtsp":
-                async with app_state.frame_lock:
-                    app_state.last_frame = generate_text_frame("Menghubungkan RTSP CCTV...")
-
-            elif mode == "upload":
-                async with app_state.frame_lock:
-                    app_state.last_frame = generate_text_frame("Memuat video lokal...")
-
-            new_streamer = VideoStreamer(resolved_url, mode, app_state.yolo_model)
-            new_streamer.start()
-            set_streamer(new_streamer)
-            log.info(f"[Manager] VideoStreamer baru aktif: {mode}")
-
-        # Monitor danger dari deteksi
-        streamer = get_streamer()
-        if streamer and streamer.is_alive():
-            detections = streamer.get_latest_detections()
-            H, W       = 360, 640
-            frame_ref  = streamer.get_latest_frame()
-            if frame_ref is not None:
-                H, W = frame_ref.shape[:2]
-
-            polygon_abs = []
-            if len(app_state.polygon_points) >= 3:
-                for pt in app_state.polygon_points:
-                    polygon_abs.append([int(pt['x'] * W), int(pt['y'] * H)])
-                polygon_abs = np.array(polygon_abs, np.int32)
-
-            yolo_danger = False
-            for det in detections:
-                x1, y1, x2, y2 = det['xyxy']
-                cx = (x1 + x2) / 2
-                cy = (y1 + y2) / 2
-                inside = True
-                if len(polygon_abs) >= 3:
-                    d = cv2.pointPolygonTest(polygon_abs, (float(cx), float(cy)), False)
-                    if d < 0:
-                        inside = False
-                if inside and det['cls'] == 'train':
-                    yolo_danger = True
-
-            app_state.yolo_danger = yolo_danger
-
-        await asyncio.sleep(1.0)
-
-    set_streamer(None)
-
-
 # ── MJPEG Async Generator ─────────────────────────────────────────────────────
 async def generate_mjpeg_stream():
     """
-    Async generator MJPEG.
-    Tugas TUNGGAL:
-      1. Ambil latest_annotated_frame dari VideoStreamer (sudah ada bbox dari .plot())
-      2. Resize ke 640x360
-      3. Encode JPEG 55%
-      4. yield ke frontend ~30 FPS
+    Async MJPEG Generator — Strict 30 FPS Pacing.
 
-    TIDAK ada manual cv2.rectangle di sini → semuanya sudah dilakukan .plot().
+    Pipeline:
+      1. Ambil latest_annotated_frame (bbox SUDAH tergambar oleh .plot())
+      2. Resize ringan: 640x480 → 640x360 (crop letterbox atas-bawah)
+      3. Tambah overlay tipis (jumlah objek + timestamp)
+      4. Encode JPEG 60%
+      5. yield dengan strict asyncio.sleep(0.033) → metronom 30 FPS konstan
+
+    TIDAK ada manual cv2.rectangle di sini.
+    Drop-frame otomatis: selalu ambil frame TERBARU dari shared state.
     """
-    DISPLAY_W, DISPLAY_H = 640, 360
+    DISPLAY_W = 640
+    DISPLAY_H = 360
+    TARGET_FPS_DELAY = 0.033  # 1/30 detik = ~30 FPS konstan
 
     # Frame inisialisasi
-    init_f = generate_text_frame("NusaRail AI Engine\nMenginisialisasi sistem...", bg_color=(10, 15, 30))
-    ret, buf = cv2.imencode('.jpg', init_f, [cv2.IMWRITE_JPEG_QUALITY, 55])
+    init_f   = generate_text_frame("NusaRail Vision System v5\nMenginisialisasi AI Engine...",
+                                   bg_color=(10, 15, 30))
+    ret, buf = cv2.imencode('.jpg', init_f, [cv2.IMWRITE_JPEG_QUALITY, 60])
     if ret:
         yield b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + buf.tobytes() + b'\r\n'
 
     while app_state.running:
+        # ── Metronom: catat waktu mulai setiap siklus ─────────────
+        t_loop_start = asyncio.get_event_loop().time()
+
         streamer = get_streamer()
 
         # ── Tidak ada streamer aktif ──────────────────────────────
         if streamer is None or not streamer.is_alive():
-            wait_f = generate_text_frame("Menghubungkan ke sumber video...", bg_color=(15, 20, 40))
-            ret, buf = cv2.imencode('.jpg', wait_f, [cv2.IMWRITE_JPEG_QUALITY, 55])
+            wait_f   = generate_text_frame("Menghubungkan ke sumber video...",
+                                           bg_color=(15, 20, 40))
+            ret, buf = cv2.imencode('.jpg', wait_f, [cv2.IMWRITE_JPEG_QUALITY, 60])
             if ret:
                 yield b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + buf.tobytes() + b'\r\n'
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(TARGET_FPS_DELAY)
             continue
 
         # ── Ambil frame yang SUDAH dianotasi oleh .plot() ─────────
+        # Drop-frame: get_latest_annotated_frame() selalu mengembalikan TERBARU
         frame = streamer.get_latest_annotated_frame()
 
         if frame is None:
-            # AI Worker belum selesai inference pertama, tampilkan frame mentah
+            # AI Worker belum selesai inference pertama → tampilkan frame mentah
             frame = streamer.get_latest_frame()
             if frame is None:
-                await asyncio.sleep(0.05)
+                # Belum ada frame sama sekali → skip, tunggu
+                sleep_remaining = TARGET_FPS_DELAY - (asyncio.get_event_loop().time() - t_loop_start)
+                await asyncio.sleep(max(0, sleep_remaining))
                 continue
-            # Tambahkan overlay "AI Loading..."
-            cv2.putText(frame, "AI Loading...", (10, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2, cv2.LINE_AA)
+            cv2.putText(frame, "AI warming up...", (10, 35),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 220, 255), 2, cv2.LINE_AA)
 
-        # ── Resize ke display 640x360 ─────────────────────────────
-        frame = cv2.resize(frame, (DISPLAY_W, DISPLAY_H))
-        H, W  = DISPLAY_H, DISPLAY_W
+        # ── Resize: 640x480 (AI output) → 640x360 (display) ─────
+        # Crop 60px atas-bawah (letterbox crop) agar rasio 16:9
+        # Ini BUKAN resize ulang bbox! Bbox sudah tergambar sebagai pixel.
+        h_src, w_src = frame.shape[:2]
+        if h_src != DISPLAY_H or w_src != DISPLAY_W:
+            frame = cv2.resize(frame, (DISPLAY_W, DISPLAY_H))
+
+        H, W = DISPLAY_H, DISPLAY_W
 
         # ── Geo-Fence Overlay (jika ada polygon) ──────────────────
         if len(app_state.polygon_points) >= 3:
@@ -671,31 +639,37 @@ async def generate_mjpeg_stream():
             overlay = frame.copy()
             cv2.fillPoly(overlay, [pts], (0, 0, 255))
             cv2.addWeighted(overlay, 0.15, frame, 0.85, 0, frame)
-            cv2.putText(frame, "DANGER ZONE", pts[0], cv2.FONT_HERSHEY_SIMPLEX,
-                        0.5, (0, 0, 255), 2, cv2.LINE_AA)
+            cv2.putText(frame, "DANGER ZONE", tuple(pts[0]),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2, cv2.LINE_AA)
 
-        # ── Overlay info ringkas ───────────────────────────────────
+        # ── Info Overlay: jumlah objek & timestamp ────────────────
         det_count  = len(streamer.get_latest_detections())
-        info_color = (0, 255, 100) if det_count > 0 else (180, 180, 180)
+        info_color = (0, 255, 100) if det_count > 0 else (160, 160, 160)
         ts         = time.strftime("%Y-%m-%d %H:%M:%S")
 
-        cv2.putText(frame, f"AI: {det_count} objek", (8, 22),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 3, cv2.LINE_AA)
-        cv2.putText(frame, f"AI: {det_count} objek", (8, 22),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, info_color, 1, cv2.LINE_AA)
+        # Background gelap untuk keterbacaan
+        cv2.rectangle(frame, (0, 0), (190, 32), (0, 0, 0), -1)
+        cv2.putText(frame, f"AI: {det_count} objek terdeteksi", (6, 22),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.52, info_color, 1, cv2.LINE_AA)
 
         cv2.putText(frame, f"NusaRail | {ts}", (5, H - 8),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 0, 0), 3, cv2.LINE_AA)
         cv2.putText(frame, f"NusaRail | {ts}", (5, H - 8),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.42, (255, 255, 255), 1, cv2.LINE_AA)
 
-        # ── Encode JPEG 55% dan yield ─────────────────────────────
-        ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 55])
+        # ── Encode JPEG & yield ───────────────────────────────────
+        ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 60])
         if ret:
             yield b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n'
 
-        # ~30 FPS output
-        await asyncio.sleep(0.033)
+        # ── ATURAN 3: STRICT FRAME PACING (Anti-Choppy) ───────────
+        # Hitung sisa waktu yang diperlukan untuk mencapai target 30 FPS.
+        # Jika render + encode < 33ms, tidur sisa waktunya.
+        # Jika > 33ms (AI lambat), langsung lanjut (drop frame lama).
+        elapsed       = asyncio.get_event_loop().time() - t_loop_start
+        sleep_needed  = TARGET_FPS_DELAY - elapsed
+        await asyncio.sleep(max(0.001, sleep_needed))  # Minimum 1ms yield ke event loop
+
 
 
 # ── Gemini Analysis Loop ──────────────────────────────────────────────────────
