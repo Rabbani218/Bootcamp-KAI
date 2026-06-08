@@ -15,7 +15,7 @@ export default function Home() {
   if (backendUrl.includes('hf.space') && backendUrl.startsWith('http://')) {
     backendUrl = backendUrl.replace('http://', 'https://');
   }
-  const backendWsUrl = backendUrl.replace('http', 'ws') + '/api/ws/gemini';
+  const backendWsUrl = backendUrl.replace('http', 'ws') + '/ws/telemetry';
   
   const [mainTab, setMainTab] = useState<'monitoring' | 'analytics' | 'settings'>('monitoring');
   const [sourceTab, setSourceTab] = useState<'youtube' | 'rtsp' | 'upload'>('youtube');
@@ -31,8 +31,8 @@ export default function Home() {
     const fetchHealthAndStatus = async () => {
       try {
         const [healthRes, statusRes] = await Promise.all([
-          fetch(`${backendUrl}/api/health`).catch(() => null),
-          fetch(`${backendUrl}/api/status`).catch(() => null)
+          fetch(`${backendUrl}/health`).catch(() => null),
+          fetch(`${backendUrl}/`).catch(() => null)
         ]);
 
         if (healthRes) {
@@ -59,12 +59,17 @@ export default function Home() {
     e.preventDefault();
     setIsUpdating(true);
     try {
-      const payload = mode === 'youtube' ? { mode, youtube_url: youtubeUrl } : { mode, rtsp_url: rtspUrl };
-      const res = await fetch(`${backendUrl}/api/set_url`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
+      let res;
+      if (mode === 'youtube') {
+        const formData = new URLSearchParams({ url: youtubeUrl });
+        res = await fetch(`${backendUrl}/start/youtube`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: formData
+        });
+      } else {
+        res = { ok: true };
+      }
       if (!res.ok) throw new Error("Gagal update URL");
     } catch (err) {
       console.error(err);
@@ -85,7 +90,7 @@ export default function Home() {
     setIsUpdating(true);
     setUploadProgress(0);
     try {
-      await axios.post(`${backendUrl}/api/upload`, formData, {
+      await axios.post(`${backendUrl}/start/upload`, formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
         onUploadProgress: (progressEvent) => {
           if (progressEvent.total) {
