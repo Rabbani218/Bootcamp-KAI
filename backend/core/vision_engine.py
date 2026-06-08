@@ -35,13 +35,10 @@ log = logging.getLogger("nusarail.vision")
 # ---------------------------------------------------------------------------
 # COCO class mapping for target classes
 # ---------------------------------------------------------------------------
-COCO_NAMES = {
-    0: "person",
-    2: "car",
-    3: "motorcycle",
-    5: "bus",
-    6: "train",
-    7: "truck",
+NUSA_RAIL_CLASSES = {
+    0: "car",
+    1: "motorcycle",
+    2: "train",
 }
 
 # Threshold constants
@@ -141,7 +138,7 @@ class VisionEngine:
             source=frame,
             persist=True,
             tracker="bytetrack.yaml",
-            classes=[0, 2, 3, 5, 6, 7],
+            classes=[0, 1, 2],
             conf=CONFIDENCE_THRESHOLD,
             iou=0.5,
             verbose=False,
@@ -174,7 +171,15 @@ class VisionEngine:
                     x1, y1, x2, y2 = box.xyxy[0].cpu().numpy().astype(int)
                     conf = float(box.conf[0])
                     cls_id = int(box.cls[0])
-                    cls_name = COCO_NAMES.get(cls_id, f"class_{cls_id}")
+                    cls_name = NUSA_RAIL_CLASSES.get(cls_id, f"class_{cls_id}")
+
+                    # 1. PERBAIKAN: Filter Kepercayaan Khusus
+                    if cls_name == "car" and conf < 0.4:
+                        continue
+                    if cls_name == "motorcycle" and conf < 0.3:
+                        continue
+                    if cls_name == "train" and conf < 0.5:
+                        continue
 
                     # Centroid calculation
                     cx = int((x1 + x2) / 2)
@@ -203,9 +208,10 @@ class VisionEngine:
                 # ----------------------------------------------------------
                 active_ids = set()
                 
-                # CRITICAL FIX 09: Human Evacuation
-                person_detections = [d for d in raw_detections if d["cls_id"] == 0]
-                vehicle_detections = [d for d in raw_detections if d["cls_id"] in (2, 5, 7)]
+                # Model custom tidak mendeteksi person, jadi kosongkan.
+                # Jika butuh integrasi LLM Event-Driven, akan dilakukan di layer atas.
+                person_detections = []
+                vehicle_detections = [d for d in raw_detections if d["cls_name"] in ("car", "motorcycle")]
 
                 for v_det in vehicle_detections:
                     tid = v_det["track_id"]
@@ -250,15 +256,15 @@ class VisionEngine:
                         else:
                             det["is_evacuating"] = getattr(tv, 'is_evacuating', False)
 
-                        if tv.is_stuck and det["cls_id"] in (2, 3, 5, 7):
+                        if tv.is_stuck and det["cls_name"] in ("car", "motorcycle"):
                             is_car_stuck = True
                             stuck_vehicles.append(tid)
 
-                        if det.get("is_evacuating", False) and det["cls_id"] in (2, 5, 7):
+                        if det.get("is_evacuating", False) and det["cls_name"] in ("car", "motorcycle"):
                             is_evacuation_active = True
 
                     # Check for incoming train
-                    if det["cls_id"] == 6:
+                    if det["cls_name"] == "train":
                         is_train_incoming = True
 
                 # Purge stale tracks & OCCLUSION GUARD
@@ -279,7 +285,7 @@ class VisionEngine:
                             stuck_vehicles.append(tid)
                             raw_detections.append({
                                 "x1": tv.last_cx - 50, "y1": tv.last_cy - 50, "x2": tv.last_cx + 50, "y2": tv.last_cy + 50,
-                                "conf": 0.0, "cls_id": tv.class_id, "cls_name": COCO_NAMES.get(tv.class_id, "ghost"),
+                                "conf": 0.0, "cls_id": tv.class_id, "cls_name": NUSA_RAIL_CLASSES.get(tv.class_id, "ghost"),
                                 "cx": tv.last_cx, "cy": tv.last_cy, "area": 10000, "track_id": tid,
                                 "is_stuck": getattr(tv, 'is_stuck', False), "is_evacuating": getattr(tv, 'is_evacuating', False),
                                 "is_ghost": True
@@ -304,27 +310,33 @@ class VisionEngine:
                     stuck = det.get("is_stuck", False)
                     evacuating = det.get("is_evacuating", False)
 
-                    # Color coding
+                    # Color coding (BGR)
                     if evacuating:
                         color = (255, 0, 255)    # PURPLE for manual evacuation
                         thickness = 3
                     elif stuck:
                         color = (0, 0, 255)      # RED for stuck vehicles
                         thickness = 3
-                    elif det["cls_id"] == 6:
-                        color = (255, 165, 0)     # ORANGE for trains
+                    elif cls_name == "car":
+                        color = (255, 0, 0)      # BLUE
+                        thickness = 2
+                    elif cls_name == "train":
+                        color = (0, 165, 255)    # ORANGE
                         thickness = 3
+                    elif cls_name == "motorcycle":
+                        color = (0, 255, 0)      # GREEN
+                        thickness = 2
                     else:
-                        color = (0, 255, 0)       # GREEN for normal
+                        color = (0, 255, 0)
                         thickness = 2
 
                     cv2.rectangle(frame_copy, (x1, y1), (x2, y2), color, thickness)
 
                     # Label
-                    id_str = f"ID:{tid}" if tid is not None else "ID:?"
-                    label = f"{cls_name}({id_str}) {conf:.2f}"
+                    id_str = f" ID:{tid}" if tid is not None else ""
+                    label = f"{cls_name}{id_str} {conf:.2f}"
                     if det.get("is_ghost"):
-                        label = f"{cls_name}({id_str}) OCCLUDED!"
+                        label = f"{cls_name}{id_str} OCCLUDED!"
                     if evacuating:
                         label += " EVAKUASI MANUAL!"
                     elif stuck:
