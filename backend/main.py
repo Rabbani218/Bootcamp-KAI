@@ -21,6 +21,7 @@ import threading
 from typing import List
 from contextlib import asynccontextmanager
 
+import aiofiles
 import cv2
 import numpy as np
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form
@@ -206,9 +207,10 @@ async def start_upload(file: UploadFile = File(...)):
     os.makedirs(temp_dir, exist_ok=True)
     temp_path = os.path.join(temp_dir, file.filename)
 
-    with open(temp_path, "wb") as f:
-        content = await file.read()
-        f.write(content)
+    # CRITICAL FIX 12: Large File Chunked Upload Support
+    async with aiofiles.open(temp_path, "wb") as f:
+        while content := await file.read(1024 * 1024):  # Chunk 1MB
+            await f.write(content)
 
     success = stream_handler.start_upload(temp_path)
     if not success:

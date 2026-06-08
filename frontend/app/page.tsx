@@ -115,15 +115,16 @@ export default function Home() {
     setIsUpdating(true);
     setUploadProgress(0);
     try {
-      await axios.post(`${backendUrl}/start/upload`, formData, {
-        headers: { 'Content-Type': 'multipart/form-data' },
-        onUploadProgress: (progressEvent) => {
-          if (progressEvent.total) {
-            const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total);
-            setUploadProgress(percentCompleted);
-          }
-        }
+      // CRITICAL FIX 12: Large File Chunked Upload Support (Direct to HF, bypass Vercel)
+      setUploadProgress(30);
+      const response = await fetch(`${backendUrl}/start/upload`, {
+        method: 'POST',
+        body: formData
+        // DILARANG SET Content-Type: multipart/form-data secara manual!
+        // Browser akan membuatnya otomatis beserta boundary
       });
+      if (!response.ok) throw new Error("Upload failed");
+      setUploadProgress(100);
     } catch (err) {
       console.error("Upload error", err);
       alert("Gagal mengunggah video");
