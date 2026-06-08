@@ -47,7 +47,7 @@ NUSA_RAIL_CLASSES = {
 }
 
 # Threshold constants
-STUCK_DISTANCE_PX = 20       # Max centroid displacement to be considered stuck
+STUCK_DISTANCE_PX = 50       # CRITICAL FIX 14: Increased to 50 for accurate bounding box jitter tolerance
 STUCK_DURATION_SEC = 5.0      # Seconds before a stationary vehicle is flagged
 DJKA_COOLDOWN_SEC = 60.0      # CRITICAL FIX 08: Debounce interval
 CONFIDENCE_THRESHOLD = 0.15   # CRITICAL FIX 04: Low threshold for night recall
@@ -207,31 +207,49 @@ class VisionEngine:
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
 
         # 4. Emergency Alerts & DJKA Trigger
-        if emergency_status == "DARURAT_KRITIS":
-            if int(time.time() * 2) % 2 == 0:
-                cv2.putText(
-                    frame_copy,
-                    "!!! AUTO-BRAKE SIGNAL SENT TO KRL !!!",
-                    (50, 80),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 3,
-                )
-            # CRITICAL FIX 08: Debounce — fire webhook max 1x per 60s
-            # Use background task so we don't block the video stream
-            asyncio.ensure_future(self._trigger_djka_webhook())
+        # CRITICAL FIX 14: Dynamic HUD Overlay & Accurate Warning Logic
+        if emergency_status in ["DARURAT_KRITIS", "BAHAYA"]:
+            # Banner Peringatan Global (Solid Background HUD)
+            banner_height = 80
+            cv2.rectangle(frame_copy, (0, 0), (frame_copy.shape[1], banner_height), (0, 0, 255), -1)
             
-        elif emergency_status == "BAHAYA":
-            cv2.putText(
-                frame_copy,
-                "PERINGATAN: KENDARAAN MOGOK / EVAKUASI TERDETEKSI",
-                (50, 80),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2,
-            )
+            # Teks Peringatan
+            if emergency_status == "DARURAT_KRITIS" and int(time.time() * 2) % 2 == 0:
+                alert_text = "!!! AUTO-BRAKE SIGNAL SENT TO KRL !!!"
+                text_color = (0, 255, 255) # Yellow to contrast with red
+            else:
+                alert_text = "AWAS! KENDARAAN TERJEBAK DI REL!"
+                text_color = (255, 255, 255) # White
 
+            text_size = cv2.getTextSize(alert_text, cv2.FONT_HERSHEY_SIMPLEX, 1.0, 3)[0]
+            text_x = (frame_copy.shape[1] - text_size[0]) // 2
+            text_y = (banner_height + text_size[1]) // 2
+            
+            cv2.putText(frame_copy, alert_text, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 1.0, text_color, 3)
+
+            if emergency_status == "DARURAT_KRITIS":
+                # CRITICAL FIX 08: Debounce — fire webhook max 1x per 60s
+                # Use background task so we don't block the video stream
+                asyncio.ensure_future(self._trigger_djka_webhook())
+
+        # Indikator Status Dinamis
+        status_text = f"Status: {emergency_status}"
+        status_color = (0, 255, 0) if emergency_status == "AMAN" else (0, 0, 255)
+        status_thickness = 1 if emergency_status == "AMAN" else 2
+        
+        info_text = f"NusaRail Vision | Frame #{telemetry.get('frame', 0)} | "
         cv2.putText(
             frame_copy,
-            f"NusaRail Vision | Frame #{telemetry.get('frame', 0)} | Status: {emergency_status}",
+            info_text,
             (10, frame_copy.shape[0] - 15),
             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1,
+        )
+        info_text_size = cv2.getTextSize(info_text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)[0]
+        cv2.putText(
+            frame_copy,
+            status_text,
+            (10 + info_text_size[0], frame_copy.shape[0] - 15),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.5, status_color, status_thickness,
         )
 
         return frame_copy, telemetry
