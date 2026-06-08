@@ -11,7 +11,10 @@ const AnalyticsDashboard = dynamic(() => import('@/components/AnalyticsDashboard
 const AdvancedSettings = dynamic(() => import('@/components/AdvancedSettings'), { ssr: false });
 
 export default function Home() {
-  let backendUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+  let backendUrl = process.env.NEXT_PUBLIC_API_URL || process.env.NEXT_PUBLIC_BACKEND_URL || 'https://alex-universe11-bootcamp-ubsi-kai.hf.space';
+  if (backendUrl.includes('localhost') && typeof window !== 'undefined' && window.location.hostname !== 'localhost') {
+    backendUrl = 'https://alex-universe11-bootcamp-ubsi-kai.hf.space';
+  }
   if (backendUrl.includes('hf.space') && backendUrl.startsWith('http://')) {
     backendUrl = backendUrl.replace('http://', 'https://');
   }
