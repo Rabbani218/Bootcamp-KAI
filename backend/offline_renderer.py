@@ -19,7 +19,7 @@ if not os.path.exists(MODEL_PATH) and os.path.exists("dataset/best_web_optimized
 # Threshold constants dari Vision Engine
 STUCK_DISTANCE_PX = 50
 STUCK_DURATION_SEC = 5.0
-CONFIDENCE_THRESHOLD = 0.40
+CONFIDENCE_THRESHOLD = 0.25
 MIN_AREA_PX = 1500
 MAX_AREA_PX = 250000
 
@@ -55,7 +55,7 @@ class OfflineTrackedVehicle:
 
         if delta < STUCK_DISTANCE_PX:
             elapsed = current_time - self.first_seen
-            if elapsed > STUCK_DURATION_SEC and self.has_moved:
+            if elapsed > STUCK_DURATION_SEC:
                 self.is_stuck = True
         else:
             self.initial_cx = cx

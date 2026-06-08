@@ -42,7 +42,7 @@ log = logging.getLogger("nusarail.vision")
 STUCK_DISTANCE_PX = 50       # CRITICAL FIX 14: Increased to 50 for accurate bounding box jitter tolerance
 STUCK_DURATION_SEC = 5.0      # Seconds before a stationary vehicle is flagged
 DJKA_COOLDOWN_SEC = 60.0      # CRITICAL FIX 08: Debounce interval
-CONFIDENCE_THRESHOLD = 0.40   # CRITICAL FIX: Increased to 0.40 to strictly prevent hallucination
+CONFIDENCE_THRESHOLD = 0.25   # CRITICAL FIX: Lowered to 0.25 to ensure the dark car is detected
 MIN_AREA_PX = 1500            # ANTI-TROLLING: Ignore tiny objects (toys)
 MAX_AREA_PX = 250000          # ANTI-TROLLING: Ignore massive objects (close-up phone pictures)
 
@@ -87,8 +87,8 @@ class TrackedVehicle:
 
         if delta < STUCK_DISTANCE_PX:
             elapsed = self.last_seen - self.first_seen
-            # STATIC OBJECT FILTER: Only consider stuck if it has moved at least once
-            if elapsed > STUCK_DURATION_SEC and getattr(self, 'has_moved', False):
+            # STATIC OBJECT FILTER: Removed has_moved condition to allow already-stuck cars
+            if elapsed > STUCK_DURATION_SEC:
                 self.is_stuck = True
         else:
             # Vehicle has moved significantly — reset anchor
