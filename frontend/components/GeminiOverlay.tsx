@@ -147,32 +147,21 @@ export default function GeminiOverlay({ backendWsUrl, isBackendWakingUp, onWsSta
   const isStationary  = report.status?.includes("TERJEBAK");
   const isInitializing = report.status?.toUpperCase().includes("MENGINISIALISASI");
 
-  // LOGIKA AUDIO WARNING
+  // LOGIKA AUDIO WARNING (Menggunakan elemen audio HTML agar ramah kebijakan autoplay)
   const audioRef = useRef<HTMLAudioElement | null>(null);
-
-  useEffect(() => {
-    if (typeof window !== 'undefined' && !audioRef.current) {
-      audioRef.current = new Audio('/Warning.mp3');
-      audioRef.current.loop = true;
-    }
-  }, []);
 
   useEffect(() => {
     if (!audioRef.current) return;
     
     if (isDanger) {
-      audioRef.current.play().catch(e => console.error("[Audio] Autoplay diblokir browser:", e));
+      const playPromise = audioRef.current.play();
+      if (playPromise !== undefined) {
+        playPromise.catch(e => console.error("[Audio] Autoplay diblokir browser:", e));
+      }
     } else {
       audioRef.current.pause();
       audioRef.current.currentTime = 0;
     }
-
-    return () => {
-      // Hentikan audio saat komponen unmount
-      if (audioRef.current) {
-        audioRef.current.pause();
-      }
-    };
   }, [isDanger]);
 
   // Warna status badge
@@ -184,6 +173,9 @@ export default function GeminiOverlay({ backendWsUrl, isBackendWakingUp, onWsSta
 
   return (
     <div className="bg-gray-900 border border-gray-800 rounded-lg p-5 flex flex-col h-full shadow-xl">
+      {/* Elemen Audio Peringatan */}
+      <audio ref={audioRef} src="/Warning.mp3" loop preload="auto" />
+      
       {/* Header */}
       <div className="flex items-center justify-between mb-4 pb-4 border-b border-gray-800">
         <h2 className="text-lg font-semibold text-white flex items-center gap-2">
