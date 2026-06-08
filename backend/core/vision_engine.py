@@ -63,15 +63,18 @@ class TrackedVehicle:
         self.last_cy = cy
         self.first_seen = time.monotonic()
         self.last_seen = time.monotonic()
+        self.last_box = (0, 0, 0, 0)
         self.is_stuck = False
         self.has_moved = False  # STATIC OBJECT FILTER: Must have moved once
         self.is_evacuating = False
 
-    def update(self, cx: int, cy: int):
+    def update(self, cx: int, cy: int, box: tuple = None):
         """Update centroid position and recalculate stuck status."""
         self.last_cx = cx
         self.last_cy = cy
         self.last_seen = time.monotonic()
+        if box is not None:
+            self.last_box = box
 
         # Check if vehicle has ever moved significantly
         if not getattr(self, 'has_moved', False):
@@ -349,14 +352,17 @@ class VisionEngine:
                         if tid is not None:
                             active_ids.add(tid)
 
+                            box_tuple = (det["x1"], det["y1"], det["x2"], det["y2"])
                             if tid in self._tracked_vehicles:
-                                self._tracked_vehicles[tid].update(det["cx"], det["cy"])
+                                self._tracked_vehicles[tid].update(det["cx"], det["cy"], box_tuple)
                             else:
-                                self._tracked_vehicles[tid] = TrackedVehicle(
+                                tv_new = TrackedVehicle(
                                     track_id=tid,
                                     cx=det["cx"], cy=det["cy"],
                                     class_id=det["cls_id"],
                                 )
+                                tv_new.last_box = box_tuple
+                                self._tracked_vehicles[tid] = tv_new
 
                             tv = self._tracked_vehicles[tid]
                             det["is_stuck"] = tv.is_stuck
@@ -383,21 +389,25 @@ class VisionEngine:
                             time_unseen = now - tv.last_seen
                             is_critical = getattr(tv, 'is_stuck', False) or getattr(tv, 'is_evacuating', False)
                             
-                            # CRITICAL FIX 13: Temporal Smoothing (Ghost Vehicle)
-                            should_render_ghost = False
-                            if time_unseen <= 1.5:
-                                should_render_ghost = True
+                            # Latch danger state: keep critical vehicles alive for 300s
+                            max_unseen = 300.0 if is_critical else 1.5
                             
-                            if time_unseen > 1.5:
+                            if time_unseen > max_unseen:
                                 stale_ids.append(tid)
-                            elif should_render_ghost:
+                            else:
                                 if is_critical:
                                     is_car_stuck = is_car_stuck or getattr(tv, 'is_stuck', False)
                                     is_evacuation_active = is_evacuation_active or getattr(tv, 'is_evacuating', False)
                                     stuck_vehicles.append(tid)
-                                
-                                # HAPUS/DESTROY rendering kotak ghost vehicle agar tidak mengotori layar.
-                                pass
+                                    
+                                    # Redraw EXACT last known box so it looks completely stable
+                                    raw_detections.append({
+                                        "x1": tv.last_box[0], "y1": tv.last_box[1], "x2": tv.last_box[2], "y2": tv.last_box[3],
+                                        "conf": 0.40, "cls_id": tv.class_id, "cls_name": self.class_names.get(tv.class_id, "car"),
+                                        "cx": tv.last_cx, "cy": tv.last_cy, "area": 10000, "track_id": tid,
+                                        "is_stuck": getattr(tv, 'is_stuck', False), "is_evacuating": getattr(tv, 'is_evacuating', False),
+                                        "is_ghost": False # No OCCLUDED text
+                                    })
                                 
                     for tid in stale_ids:
                         del self._tracked_vehicles[tid]

@@ -34,14 +34,17 @@ class OfflineTrackedVehicle:
         self.last_cy = cy
         self.first_seen = start_time
         self.last_seen = start_time
+        self.last_box = (0, 0, 0, 0)
         self.is_stuck = False
         self.has_moved = False
         self.is_evacuating = False
 
-    def update(self, cx: int, cy: int, current_time: float):
+    def update(self, cx: int, cy: int, current_time: float, box: tuple = None):
         self.last_cx = cx
         self.last_cy = cy
         self.last_seen = current_time
+        if box is not None:
+            self.last_box = box
 
         if not self.has_moved:
             total_delta = math.sqrt((cx - self.initial_cx) ** 2 + (cy - self.initial_cy) ** 2)
@@ -170,15 +173,18 @@ def main():
                     if tid is not None:
                         active_ids.add(tid)
 
+                        box_tuple = (det["x1"], det["y1"], det["x2"], det["y2"])
                         if tid in tracked_vehicles:
-                            tracked_vehicles[tid].update(det["cx"], det["cy"], current_time)
+                            tracked_vehicles[tid].update(det["cx"], det["cy"], current_time, box_tuple)
                         else:
-                            tracked_vehicles[tid] = OfflineTrackedVehicle(
+                            tv_new = OfflineTrackedVehicle(
                                 track_id=tid,
                                 cx=det["cx"], cy=det["cy"],
                                 class_id=det["cls_id"],
                                 start_time=current_time
                             )
+                            tv_new.last_box = box_tuple
+                            tracked_vehicles[tid] = tv_new
 
                         tv = tracked_vehicles[tid]
                         det["is_stuck"] = tv.is_stuck
@@ -202,20 +208,24 @@ def main():
                         time_unseen = current_time - tv.last_seen
                         is_critical = tv.is_stuck or tv.is_evacuating
                         
-                        should_render_ghost = False
-                        if time_unseen <= 1.5:
-                            should_render_ghost = True
+                        # Latch danger state: keep critical vehicles alive for 300s
+                        max_unseen = 300.0 if is_critical else 1.5
                         
-                        if time_unseen > 1.5:
+                        if time_unseen > max_unseen:
                             stale_ids.append(tid)
-                        elif should_render_ghost:
+                        else:
                             if is_critical:
                                 is_car_stuck = is_car_stuck or tv.is_stuck
                                 is_evacuation_active = is_evacuation_active or tv.is_evacuating
-                            
-                            # HAPUS/DESTROY rendering kotak ghost vehicle agar tidak mengotori layar.
-                            # Objek tetap dihitung status MOGOK-nya namun tidak digambar ulang.
-                            pass
+                                
+                                # Redraw EXACT last known box so it looks completely stable
+                                raw_detections.append({
+                                    "x1": tv.last_box[0], "y1": tv.last_box[1], "x2": tv.last_box[2], "y2": tv.last_box[3],
+                                    "conf": 0.0, "cls_id": tv.class_id, "cls_name": class_names.get(tv.class_id, "car"),
+                                    "cx": tv.last_cx, "cy": tv.last_cy, "area": 10000, "track_id": tid,
+                                    "is_stuck": tv.is_stuck, "is_evacuating": tv.is_evacuating,
+                                    "is_ghost": False # No OCCLUDED text
+                                })
                             
                 for tid in stale_ids:
                     del tracked_vehicles[tid]
