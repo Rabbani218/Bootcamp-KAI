@@ -57,11 +57,19 @@ export default function GeminiOverlay({ backendWsUrl, isBackendWakingUp, onWsSta
           const data = JSON.parse(event.data) as GeminiReport;
           console.log("[GeminiOverlay] Data diterima:", data);
 
-          // Update SEMUA state dari data server secara langsung
+          const currentStatus = data.status || "AMAN";
+          const isDangerStatus = currentStatus.toUpperCase().includes("BAHAYA") || currentStatus.toUpperCase().includes("DARURAT");
+
+          const forcedLokasi = "Stasiun Duren Kalibata (Jalur Bogor - Jakarta Kota)";
+          const forcedNarasi = isDangerStatus 
+              ? "Jalur ini bahaya. Mengirimkan pesan peringatan ke DJKA untuk memberlakukan semboyan (sinyal merah terdekat) dan rem darurat pada rangkaian KRL untuk melakukan pengereman darurat."
+              : "Jalur ini aman, tidak ada tanda bahaya di sini.";
+
+          // Update SEMUA state dari data server secara langsung dengan override demo
           setReport({
-            status:    data.status    || "AMAN",
-            lokasi:    data.lokasi    || "Tidak dikenali",
-            narasi:    data.narasi    || "Tidak ada narasi.",
+            status:    currentStatus,
+            lokasi:    forcedLokasi,
+            narasi:    forcedNarasi,
             timestamp: data.timestamp,
           });
           setLastUpdate(new Date());
