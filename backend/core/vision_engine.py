@@ -255,13 +255,14 @@ class VisionEngine:
             self._frame_count += 1
             
             # --- START YOLOv8 INFERENCE ---
+            # CRITICAL FIX 13: NMS & Temporal Smoothing untuk Akurasi Objek
             results = self._model.track(
                 source=frame,
                 persist=True,
                 tracker="bytetrack.yaml",
                 classes=[0, 2, 3, 5, 6, 7],
                 conf=CONFIDENCE_THRESHOLD,
-                iou=0.5,
+                iou=0.45,
                 verbose=False,
             )
             
@@ -369,15 +370,23 @@ class VisionEngine:
                     for tid, tv in self._tracked_vehicles.items():
                         if tid not in active_ids:
                             time_unseen = now - tv.last_seen
-                            is_ghost = getattr(tv, 'is_stuck', False) or getattr(tv, 'is_evacuating', False)
-                            max_unseen = 5.0 if is_ghost else 10.0
+                            is_critical = getattr(tv, 'is_stuck', False) or getattr(tv, 'is_evacuating', False)
                             
-                            if time_unseen > max_unseen:
+                            # CRITICAL FIX 13: Temporal Smoothing (Ghost Vehicle)
+                            should_render_ghost = False
+                            if is_critical and time_unseen <= 5.0:
+                                should_render_ghost = True
+                            elif not is_critical and time_unseen <= 3.0:
+                                should_render_ghost = True
+                            
+                            if time_unseen > 10.0:
                                 stale_ids.append(tid)
-                            elif is_ghost:
-                                is_car_stuck = is_car_stuck or getattr(tv, 'is_stuck', False)
-                                is_evacuation_active = is_evacuation_active or getattr(tv, 'is_evacuating', False)
-                                stuck_vehicles.append(tid)
+                            elif should_render_ghost:
+                                if is_critical:
+                                    is_car_stuck = is_car_stuck or getattr(tv, 'is_stuck', False)
+                                    is_evacuation_active = is_evacuation_active or getattr(tv, 'is_evacuating', False)
+                                    stuck_vehicles.append(tid)
+                                
                                 raw_detections.append({
                                     "x1": tv.last_cx - 50, "y1": tv.last_cy - 50, "x2": tv.last_cx + 50, "y2": tv.last_cy + 50,
                                     "conf": 0.0, "cls_id": tv.class_id, "cls_name": NUSA_RAIL_CLASSES.get(tv.class_id, "ghost"),
