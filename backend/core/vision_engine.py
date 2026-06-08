@@ -42,7 +42,7 @@ log = logging.getLogger("nusarail.vision")
 STUCK_DISTANCE_PX = 50       # CRITICAL FIX 14: Increased to 50 for accurate bounding box jitter tolerance
 STUCK_DURATION_SEC = 5.0      # Seconds before a stationary vehicle is flagged
 DJKA_COOLDOWN_SEC = 60.0      # CRITICAL FIX 08: Debounce interval
-CONFIDENCE_THRESHOLD = 0.35   # CRITICAL FIX: Increased to 0.35 to prevent hallucination
+CONFIDENCE_THRESHOLD = 0.40   # CRITICAL FIX: Increased to 0.40 to strictly prevent hallucination
 MIN_AREA_PX = 1500            # ANTI-TROLLING: Ignore tiny objects (toys)
 MAX_AREA_PX = 250000          # ANTI-TROLLING: Ignore massive objects (close-up phone pictures)
 
@@ -165,16 +165,16 @@ class VisionEngine:
             # Color coding (BGR)
             if evacuating:
                 color = (255, 0, 255)    # PURPLE for manual evacuation
-                thickness = 3
+                thickness = 2
             elif stuck:
                 color = (0, 0, 255)      # RED for stuck vehicles
-                thickness = 3
+                thickness = 2
             elif cls_name == "car":
                 color = (255, 0, 0)      # BLUE
                 thickness = 2
             elif cls_name == "train":
                 color = (0, 165, 255)    # ORANGE
-                thickness = 3
+                thickness = 2
             elif cls_name == "motorcycle":
                 color = (0, 255, 0)      # GREEN
                 thickness = 2
@@ -396,13 +396,8 @@ class VisionEngine:
                                     is_evacuation_active = is_evacuation_active or getattr(tv, 'is_evacuating', False)
                                     stuck_vehicles.append(tid)
                                 
-                                raw_detections.append({
-                                    "x1": tv.last_cx - 50, "y1": tv.last_cy - 50, "x2": tv.last_cx + 50, "y2": tv.last_cy + 50,
-                                    "conf": 0.0, "cls_id": tv.class_id, "cls_name": self.class_names.get(tv.class_id, "ghost"),
-                                    "cx": tv.last_cx, "cy": tv.last_cy, "area": 10000, "track_id": tid,
-                                    "is_stuck": getattr(tv, 'is_stuck', False), "is_evacuating": getattr(tv, 'is_evacuating', False),
-                                    "is_ghost": True
-                                })
+                                # HAPUS/DESTROY rendering kotak ghost vehicle agar tidak mengotori layar.
+                                pass
                                 
                     for tid in stale_ids:
                         del self._tracked_vehicles[tid]

@@ -19,7 +19,7 @@ if not os.path.exists(MODEL_PATH) and os.path.exists("dataset/best_web_optimized
 # Threshold constants dari Vision Engine
 STUCK_DISTANCE_PX = 50
 STUCK_DURATION_SEC = 5.0
-CONFIDENCE_THRESHOLD = 0.35
+CONFIDENCE_THRESHOLD = 0.40
 MIN_AREA_PX = 1500
 MAX_AREA_PX = 250000
 
@@ -213,13 +213,9 @@ def main():
                                 is_car_stuck = is_car_stuck or tv.is_stuck
                                 is_evacuation_active = is_evacuation_active or tv.is_evacuating
                             
-                            raw_detections.append({
-                                "x1": tv.last_cx - 50, "y1": tv.last_cy - 50, "x2": tv.last_cx + 50, "y2": tv.last_cy + 50,
-                                "conf": 0.0, "cls_id": tv.class_id, "cls_name": class_names.get(tv.class_id, "ghost"),
-                                "cx": tv.last_cx, "cy": tv.last_cy, "area": 10000, "track_id": tid,
-                                "is_stuck": tv.is_stuck, "is_evacuating": tv.is_evacuating,
-                                "is_ghost": True
-                            })
+                            # HAPUS/DESTROY rendering kotak ghost vehicle agar tidak mengotori layar.
+                            # Objek tetap dihitung status MOGOK-nya namun tidak digambar ulang.
+                            pass
                             
                 for tid in stale_ids:
                     del tracked_vehicles[tid]
@@ -245,16 +241,16 @@ def main():
 
             if evacuating:
                 color = (255, 0, 255)
-                thickness = 3
+                thickness = 2
             elif stuck:
                 color = (0, 0, 255)
-                thickness = 3
+                thickness = 2
             elif cls_name == "car":
                 color = (255, 0, 0)
                 thickness = 2
             elif cls_name == "train":
                 color = (0, 165, 255)
-                thickness = 3
+                thickness = 2
             elif cls_name == "motorcycle":
                 color = (0, 255, 0)
                 thickness = 2
