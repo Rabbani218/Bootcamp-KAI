@@ -13,9 +13,10 @@ interface GeminiOverlayProps {
   backendWsUrl: string;
   isBackendWakingUp?: boolean;
   onWsStatusChange?: (status: 'connected' | 'disconnected') => void;
+  isDemoMode?: boolean;
 }
 
-export default function GeminiOverlay({ backendWsUrl, isBackendWakingUp, onWsStatusChange }: GeminiOverlayProps) {
+export default function GeminiOverlay({ backendWsUrl, isBackendWakingUp, onWsStatusChange, isDemoMode }: GeminiOverlayProps) {
   const [report, setReport] = useState<GeminiReport>({
     status: "MENGINISIALISASI",
     lokasi: "Menghubungkan ke AI...",
@@ -26,6 +27,37 @@ export default function GeminiOverlay({ backendWsUrl, isBackendWakingUp, onWsSta
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<NodeJS.Timeout | null>(null);
   const retryCount = useRef(0);
+
+  // LOGIKA SIMULASI MODE DEMO
+  useEffect(() => {
+    if (!isDemoMode) return;
+
+    // Paksa status ke Connected untuk UI
+    setConnected(true);
+    if (onWsStatusChange) onWsStatusChange('connected');
+
+    // Detik 0-5: Kondisi Aman
+    setReport({
+      status: "AMAN",
+      lokasi: "Stasiun Duren Kalibata (Jalur Bogor - Jakarta Kota)",
+      narasi: "Jalur ini aman, tidak ada tanda bahaya di sini.",
+      timestamp: Math.floor(Date.now() / 1000)
+    });
+    setLastUpdate(new Date());
+
+    // Detik 5+: Bahaya! Sama persis dengan kemunculan red banner di video demo
+    const dangerTimer = setTimeout(() => {
+      setReport({
+        status: "DARURAT_KRITIS: KENDARAAN TERJEBAK",
+        lokasi: "Stasiun Duren Kalibata (Jalur Bogor - Jakarta Kota)",
+        narasi: "Jalur ini bahaya. Mengirimkan pesan peringatan ke DJKA untuk memberlakukan semboyan (sinyal merah terdekat) dan rem darurat pada rangkaian KRL untuk melakukan pengereman darurat.",
+        timestamp: Math.floor(Date.now() / 1000)
+      });
+      setLastUpdate(new Date());
+    }, 5000);
+
+    return () => clearTimeout(dangerTimer);
+  }, [isDemoMode]);
 
   useEffect(() => {
     const connect = () => {
@@ -53,6 +85,7 @@ export default function GeminiOverlay({ backendWsUrl, isBackendWakingUp, onWsSta
       // Data dari backend: {"status":"...", "lokasi":"...", "narasi":"...", "timestamp":...}
       // ──────────────────────────────────────────────────────────
       ws.onmessage = (event) => {
+        if (isDemoMode) return; // Abaikan data asli dari server jika sedang dalam mode Simulasi Canned Demo
         try {
           const data = JSON.parse(event.data) as GeminiReport;
           console.log("[GeminiOverlay] Data diterima:", data);
