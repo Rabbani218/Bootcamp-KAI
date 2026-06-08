@@ -271,6 +271,12 @@ async def video_feed():
     return StreamingResponse(
         _mjpeg_generator(),
         media_type="multipart/x-mixed-replace; boundary=frame",
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+            "X-Accel-Buffering": "no",  # CRITICAL: Prevent Hugging Face Nginx from buffering the MJPEG stream
+        }
     )
 
 
@@ -296,6 +302,9 @@ async def ws_telemetry(websocket: WebSocket):
 
             if telemetry:
                 await websocket.send_text(json.dumps(telemetry, ensure_ascii=False))
+            else:
+                # CRITICAL FIX 11: Prevent HF Nginx from dropping idle WebSocket connection
+                await websocket.send_text(json.dumps({"type": "ping", "status": "idle"}))
 
             # Also listen for incoming messages (keep-alive / commands)
             try:
