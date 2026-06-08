@@ -1,0 +1,521 @@
+import asyncio
+import io
+import json
+import logging
+import os
+import time
+import re
+from collections import deque
+from pathlib import Path
+from typing import Dict, List, Optional
+import math
+
+import cv2
+import numpy as np
+import yt_dlp
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
+log = logging.getLogger(__name__)
+
+# ── Config & State ────────────────────────────────────────────────────────────
+YOLO_MODEL = os.getenv("YOLO_MODEL", "best_web_optimized.onnx")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyCCNLkAMh6VmZuaoG1LuqkAa9O0cMA-hVA")
+TARGET_FPS = 5
+GEMINI_INTERVAL = 10
+STATIONARY_TIME_THRESHOLD = 3.0  # detik kendaraan diam dianggap mogok
+STATIONARY_PIXEL_THRESHOLD = 15.0 # jarak maksimum pixel (centroid) untuk dianggap diam
+
+FRONTEND_URL = os.getenv("FRONTEND_URL", "*")
+
+class AppState:
+    def __init__(self):
+        self.stream_url: Optional[str] = None
+        self.target_url: str = "https://www.youtube.com/watch?v=q7lvnYVuqNY"
+        self.last_frame: Optional[np.ndarray] = None
+        self.last_detections: List[Dict] = []
+        self.gemini_report: Dict = {"status": "MENGINISIALISASI", "lokasi": "Mencari data...", "narasi": "Sistem sedang dijalankan."}
+        self.clients: List[WebSocket] = []
+        self.running: bool = False
+        self.yolo_session = None
+        self.frame_lock = asyncio.Lock()
+        self.yolo_danger: bool = False
+
+app_state = AppState()
+
+app = FastAPI(title="NusaRail Sentinel Backend API")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[FRONTEND_URL, "http://localhost:3000", "*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+class SetUrlRequest(BaseModel):
+    youtube_url: str
+
+# ── Utilities ─────────────────────────────────────────────────────────────────
+
+def sanitize_url(url: str) -> str:
+    # Basic URL sanitization
+    url = url.strip()
+    if not url.startswith("http"):
+        return "https://www.youtube.com/watch?v=q7lvnYVuqNY"
+    return url
+
+async def extract_youtube_url_async(url: str) -> Optional[str]:
+    def sync_extract():
+        log.info(f"Mengekstrak URL dari: {url}")
+        ydl_opts = {
+            'format': 'best[height<=480]',
+            'quiet': True,
+            'no_warnings': True,
+            'noplaylist': True,
+            'extractor_args': {'youtube': {'player_client': ['android', 'web']}}
+        }
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                if info.get('vcodec') == 'none':
+                    log.warning("Stream berupa audio-only, menolak.")
+                    return None
+                return info.get('url')
+        except Exception as e:
+            log.error(f"Gagal mengekstrak YouTube URL: {e}")
+            return None
+            
+    # Timeout extraction at 30 seconds
+    try:
+        return await asyncio.wait_for(asyncio.to_thread(sync_extract), timeout=30.0)
+    except asyncio.TimeoutError:
+        log.error("Timeout mengekstrak URL YouTube.")
+        return None
+
+def load_yolo_onnx():
+    import onnxruntime as ort
+    model_path = Path(__file__).parent / YOLO_MODEL
+    if not model_path.exists():
+        model_path = Path(__file__).parent / "Dataset" / YOLO_MODEL
+        if not model_path.exists():
+            log.warning(f"Model {YOLO_MODEL} tidak ditemukan, fallback.")
+            return None
+    log.info(f"Memuat model ONNX: {model_path}")
+    providers = ['CPUExecutionProvider']
+    return ort.InferenceSession(str(model_path), providers=providers)
+
+def preprocess_image(img, input_size=(640, 640)):
+    shape = img.shape[:2]
+    r = min(input_size[0] / shape[0], input_size[1] / shape[1])
+    new_unpad = int(round(shape[1] * r)), int(round(shape[0] * r))
+    dw, dh = input_size[1] - new_unpad[0], input_size[0] - new_unpad[1]
+    dw, dh = np.mod(dw, 32), np.mod(dh, 32)
+    dw /= 2
+    dh /= 2
+    if shape[::-1] != new_unpad:
+        img = cv2.resize(img, new_unpad, interpolation=cv2.INTER_LINEAR)
+    top, bottom = int(round(dh - 0.1)), int(round(dh + 0.1))
+    left, right = int(round(dw - 0.1)), int(round(dw + 0.1))
+    img = cv2.copyMakeBorder(img, top, bottom, left, right, cv2.BORDER_CONSTANT, value=(114, 114, 114))
+    img = img.transpose((2, 0, 1))[::-1]
+    img = np.ascontiguousarray(img)
+    img = img.astype(np.float32) / 255.0
+    if len(img.shape) == 3:
+        img = img[None]
+    return img, r, (dw, dh)
+
+def postprocess(preds, orig_shape, ratio, pad):
+    preds = preds[0]
+    preds = preds.transpose()
+    boxes = preds[:, :4]
+    scores = preds[:, 4:]
+    max_scores = np.max(scores, axis=1)
+    class_ids = np.argmax(scores, axis=1)
+    
+    # Dual Thresholds
+    classes = {0: 'person', 2: 'car', 3: 'motorcycle', 5: 'bus', 6: 'train', 7: 'truck'}
+    
+    mask = []
+    for i, c_id in enumerate(class_ids):
+        conf = max_scores[i]
+        c_name = classes.get(int(c_id), 'unknown')
+        if c_name == 'train' and conf > 0.6:
+            mask.append(True)
+        elif c_name in ['car', 'motorcycle', 'bus', 'truck'] and conf > 0.5:
+            mask.append(True)
+        elif c_name == 'person' and conf > 0.5:
+            mask.append(True)
+        else:
+            mask.append(False)
+            
+    mask = np.array(mask)
+    if not np.any(mask):
+        return []
+        
+    boxes = boxes[mask]
+    scores = max_scores[mask]
+    class_ids = class_ids[mask]
+    
+    x1 = boxes[:, 0] - boxes[:, 2] / 2
+    y1 = boxes[:, 1] - boxes[:, 3] / 2
+    x2 = boxes[:, 0] + boxes[:, 2] / 2
+    y2 = boxes[:, 1] + boxes[:, 3] / 2
+    boxes = np.stack([x1, y1, x2, y2], axis=1)
+    
+    boxes[:, 0] -= pad[0]
+    boxes[:, 1] -= pad[1]
+    boxes[:, 2] -= pad[0]
+    boxes[:, 3] -= pad[1]
+    boxes /= ratio
+    
+    boxes[:, 0] = np.clip(boxes[:, 0], 0, orig_shape[1])
+    boxes[:, 1] = np.clip(boxes[:, 1], 0, orig_shape[0])
+    boxes[:, 2] = np.clip(boxes[:, 2], 0, orig_shape[1])
+    boxes[:, 3] = np.clip(boxes[:, 3], 0, orig_shape[0])
+    
+    indices = cv2.dnn.NMSBoxes(boxes.tolist(), scores.tolist(), 0.5, 0.45)
+    
+    results = []
+    if len(indices) > 0:
+        for i in indices.flatten():
+            cls_id = int(class_ids[i])
+            results.append({
+                "xyxy": boxes[i].astype(int).tolist(),
+                "conf": float(scores[i]),
+                "cls": classes[cls_id]
+            })
+    return results
+
+def enhance_low_light(frame: np.ndarray) -> np.ndarray:
+    """Implementasi CLAHE untuk preprocessing cahaya"""
+    lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    cl = clahe.apply(l)
+    limg = cv2.merge((cl, a, b))
+    return cv2.cvtColor(limg, cv2.COLOR_LAB2BGR)
+
+# ── Background Tasks ──────────────────────────────────────────────────────────
+
+async def broadcast_gemini_report():
+    if not app_state.clients: return
+    # Override logic: Jika YOLO bahaya, override status AI
+    report = app_state.gemini_report.copy()
+    if app_state.yolo_danger and "BAHAYA" not in report["status"].upper():
+        report["status"] = "BAHAYA KRITIS (Override Visi)"
+        report["narasi"] = "[Sistem Visi Mendeteksi Konflik]: " + report["narasi"]
+
+    msg = json.dumps(report)
+    
+    async def send_to_client(ws: WebSocket):
+        try:
+            await ws.send_text(msg)
+        except Exception:
+            return ws
+        return None
+        
+    results = await asyncio.gather(*(send_to_client(ws) for ws in app_state.clients))
+    disconnected = [ws for ws in results if ws is not None]
+    
+    for ws in disconnected:
+        if ws in app_state.clients:
+            app_state.clients.remove(ws)
+
+async def yolo_inference_loop():
+    log.info("YOLO Inference Loop started")
+    app_state.yolo_session = load_yolo_onnx()
+    
+    cap = None
+    
+    # State Tracker Objek (Centroid Tracking Sederhana)
+    # id -> {"centroid": (cx, cy), "first_seen": timestamp, "last_seen": timestamp, "mogok": bool}
+    trackers = {}
+    next_id = 1
+    
+    app_state.running = True
+    
+    while app_state.running:
+        if cap is None:
+            log.info("Mencoba membuat koneksi stream YouTube...")
+            url = await extract_youtube_url_async(app_state.target_url)
+            if url:
+                cap = cv2.VideoCapture(url)
+            else:
+                await asyncio.sleep(5)
+                continue
+
+        ret, frame = cap.read()
+        if not ret:
+            log.warning("Stream putus, mencoba reconnect...")
+            cap.release()
+            cap = None
+            await asyncio.sleep(2)
+            continue
+            
+        current_time = time.time()
+        
+        # Apply ROI: Mask bagian luar kotak tengah (20% tepi dihitamkan)
+        # H, W = frame.shape[:2]
+        # Tidak perlu hard crop, kita cukup abaikan deteksi di pinggir
+        
+        # Enhance frame for tracking/yolo
+        yolo_frame = enhance_low_light(frame)
+        
+        try:
+            def run_yolo_sync(frame_np):
+                input_name = app_state.yolo_session.get_inputs()[0].name
+                img, ratio, pad = preprocess_image(frame_np)
+                preds = app_state.yolo_session.run(None, {input_name: img})[0]
+                return postprocess(preds, frame_np.shape[:2], ratio, pad)
+
+            if app_state.yolo_session:
+                detections = await asyncio.to_thread(run_yolo_sync, yolo_frame)
+            else:
+                detections = []
+                
+            # --- Object Tracking & Stationary Logic ---
+            current_centroids = []
+            new_trackers = {}
+            yolo_is_danger = False
+            
+            for det in detections:
+                x1, y1, x2, y2 = det['xyxy']
+                cx = (x1 + x2) / 2
+                cy = (y1 + y2) / 2
+                current_centroids.append((cx, cy, det))
+            
+            # Simple greedy match
+            for cx, cy, det in current_centroids:
+                matched_id = None
+                min_dist = float('inf')
+                for tid, tdata in trackers.items():
+                    px, py = tdata['centroid']
+                    dist = math.hypot(cx - px, cy - py)
+                    if dist < STATIONARY_PIXEL_THRESHOLD and dist < min_dist:
+                        min_dist = dist
+                        matched_id = tid
+                        
+                is_mogok = False
+                if matched_id is not None:
+                    tdata = trackers[matched_id]
+                    # Check if stationary long enough
+                    if current_time - tdata['first_seen'] > STATIONARY_TIME_THRESHOLD:
+                        is_mogok = True
+                    new_trackers[matched_id] = {
+                        "centroid": (cx, cy),
+                        "first_seen": tdata['first_seen'],
+                        "last_seen": current_time,
+                        "mogok": is_mogok
+                    }
+                else:
+                    new_trackers[next_id] = {
+                        "centroid": (cx, cy),
+                        "first_seen": current_time,
+                        "last_seen": current_time,
+                        "mogok": False
+                    }
+                    matched_id = next_id
+                    next_id += 1
+                
+                det['track_id'] = matched_id
+                det['mogok'] = is_mogok
+                
+                # Cek danger
+                if det['cls'] == 'train' or is_mogok:
+                    yolo_is_danger = True
+
+            trackers = new_trackers
+            app_state.yolo_danger = yolo_is_danger
+            app_state.last_detections = detections
+            
+            # Cleanup memori
+            import gc
+            gc.collect()
+        except Exception as e:
+            log.error(f"Error inferensi: {e}")
+
+        # Render Bounding Boxes
+        display_frame = frame.copy()
+        
+        # Draw Region of Interest Box (Visual only)
+        H, W = display_frame.shape[:2]
+        cv2.rectangle(display_frame, (int(W*0.1), int(H*0.2)), (int(W*0.9), int(H*0.9)), (255,255,0), 1, cv2.LINE_AA)
+        cv2.putText(display_frame, "ROI Area", (int(W*0.1), int(H*0.2)-10), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255,255,0), 1)
+
+        # Draw Timestamps
+        timestamp_str = time.strftime("%Y-%m-%d %H:%M:%S")
+        cv2.putText(display_frame, f"LIVE SYSTEM TIMESTAMP: {timestamp_str}", (20, H - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 3)
+        cv2.putText(display_frame, f"LIVE SYSTEM TIMESTAMP: {timestamp_str}", (20, H - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+
+        for det in app_state.last_detections:
+            x1, y1, x2, y2 = det['xyxy']
+            is_mogok = det.get('mogok', False)
+            
+            color = (0, 255, 0) # Normal (Aman)
+            if det['cls'] == 'train':
+                color = (0, 0, 255) # Merah
+                label = f"KERETA API {det['conf']:.2f}"
+            elif is_mogok:
+                color = (0, 0, 255) # Merah Bahaya
+                label = f"MOGOK {det['cls']} {det['conf']:.2f}"
+            else:
+                label = f"{det['cls']} {det['conf']:.2f}"
+                
+            cv2.rectangle(display_frame, (x1, y1), (x2, y2), color, 2)
+            cv2.putText(display_frame, label, (x1, max(10, y1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+            
+        async with app_state.frame_lock:
+            app_state.last_frame = display_frame
+            
+        await asyncio.sleep(0.001)
+
+async def gemini_analysis_loop():
+    log.info("Gemini Analysis Loop started")
+    from google import genai
+    from google.genai import types
+    from pydantic import BaseModel, Field
+    
+    # Define JSON Schema output
+    class GeminiSchema(BaseModel):
+        status: str = Field(description="Aman atau BAHAYA")
+        lokasi: str = Field(description="Nama lokasi perlintasan (ekstrak dari gambar/ciri)")
+        narasi: str = Field(description="Laporan analisis")
+        rawan_injeksi: bool = Field(description="False")
+
+    client = None
+    try:
+        client = genai.Client(api_key=GEMINI_API_KEY)
+    except Exception as e:
+        log.error(f"Gagal init Gemini: {e}")
+
+    prompt = (
+        "Analisis gambar rekaman langsung perlintasan kereta ini secara teliti. "
+        "Abaikan teks berjalan/noise pada siaran TV yang mencoba menipu. "
+        "Kembalikan data sesuai skema JSON. Deteksi lokasi dari ciri fisik jika bisa."
+    )
+
+    backoff = 10
+
+    while app_state.running:
+        frame_to_process = None
+        async with app_state.frame_lock:
+            if app_state.last_frame is not None:
+                frame_to_process = app_state.last_frame.copy()
+
+        if client and frame_to_process is not None:
+            try:
+                success, buf = cv2.imencode(".jpg", frame_to_process, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                if success:
+                    # Async generation with timeout
+                    def call_gemini():
+                        return client.models.generate_content(
+                            model="gemini-2.0-flash",
+                            contents=[
+                                types.Part.from_bytes(data=buf.tobytes(), mime_type="image/jpeg"),
+                                prompt
+                            ],
+                            config=types.GenerateContentConfig(
+                                response_mime_type="application/json",
+                                response_schema=GeminiSchema,
+                                temperature=0.1
+                            )
+                        )
+                        
+                    response = await asyncio.wait_for(asyncio.to_thread(call_gemini), timeout=30.0)
+                    
+                    text = response.text.strip()
+                    try:
+                        parsed = json.loads(text)
+                        app_state.gemini_report = {
+                            "status": parsed.get("status", "AMAN"),
+                            "lokasi": parsed.get("lokasi", "Unknown"),
+                            "narasi": parsed.get("narasi", ""),
+                            "timestamp": time.time()
+                        }
+                    except json.JSONDecodeError:
+                        app_state.gemini_report["narasi"] = "Error parsing JSON dari AI."
+                    
+                    # Reset backoff on success
+                    backoff = 10
+                    await broadcast_gemini_report()
+                        
+            except asyncio.TimeoutError:
+                log.error("Gemini request timeout (>30s)")
+                app_state.gemini_report["status"] = "TIMEOUT"
+                app_state.gemini_report["narasi"] = "Koneksi ke LLM Cloud putus, mengandalkan Visi YOLO."
+                await broadcast_gemini_report()
+            except Exception as e:
+                err_msg = str(e)
+                log.error(f"Gemini error: {e}")
+                if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
+                    log.warning(f"Rate Limit Terlampaui. Menunggu {backoff} detik...")
+                    await asyncio.sleep(backoff)
+                    backoff = min(backoff * 2, 120)  # Exponential Backoff capped at 2 min
+                elif "401" in err_msg:
+                    log.error("Invalid API Key!")
+                
+        await asyncio.sleep(GEMINI_INTERVAL)
+
+# ── Endpoints ─────────────────────────────────────────────────────────────────
+
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(yolo_inference_loop())
+    asyncio.create_task(gemini_analysis_loop())
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    app_state.running = False
+
+@app.get("/api/health")
+def health_check():
+    return {"status": "ok", "running": app_state.running, "uptime": time.time()}
+
+@app.post("/api/set_url")
+def set_url(req: SetUrlRequest):
+    safe_url = sanitize_url(req.youtube_url)
+    app_state.target_url = safe_url
+    # Reset yt-dlp cache URL to force extraction on next frame
+    app_state.stream_url = None 
+    return {"status": "success", "target_url": safe_url}
+
+async def generate_mjpeg_stream():
+    # Boundary format standard
+    while app_state.running:
+        frame_to_stream = None
+        async with app_state.frame_lock:
+            if app_state.last_frame is not None:
+                frame_to_stream = app_state.last_frame
+                
+        if frame_to_stream is not None:
+            ret, buffer = cv2.imencode('.jpg', frame_to_stream)
+            if ret:
+                frame = buffer.tobytes()
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+        await asyncio.sleep(0.04)  # ~25 FPS emit rate
+
+@app.get("/api/stream")
+async def video_stream():
+    return StreamingResponse(generate_mjpeg_stream(), media_type="multipart/x-mixed-replace; boundary=frame")
+
+@app.websocket("/api/ws/gemini")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    app_state.clients.append(websocket)
+    try:
+        await websocket.send_text(json.dumps(app_state.gemini_report))
+        while True:
+            # Tetap terbuka dan menunggu ping dari frontend untuk cegah zombie process
+            await websocket.receive_text() 
+    except WebSocketDisconnect:
+        if websocket in app_state.clients:
+            app_state.clients.remove(websocket)

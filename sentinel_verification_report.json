@@ -1,0 +1,41 @@
+{
+  "tanggal": "2026-05-26 09:53:14",
+  "total_check": 8,
+  "passed": 8,
+  "failed": 0,
+  "status": "SIAP",
+  "detail": [
+    {
+      "ok": true,
+      "msg": "[PASS] [1/8] Syntax Python               : OK  (1005 baris)"
+    },
+    {
+      "ok": true,
+      "msg": "[PASS] [2/8] Library OpenCV + NumPy      : OK  cv2=4.8.1 numpy=1.26.4"
+    },
+    {
+      "ok": true,
+      "msg": "[PASS] [3/8] Ultralytics + yt-dlp        : OK  yolo=8.4.54 ytdlp=2025.10.14"
+    },
+    {
+      "ok": true,
+      "msg": "[PASS] [4/8] Google Gemini SDK           : OK  google-genai tersedia"
+    },
+    {
+      "ok": true,
+      "msg": "[PASS] [5/8] Import kelas Sentinel       : OK  8 kelas berhasil diimpor"
+    },
+    {
+      "ok": true,
+      "msg": "[PASS] [6/8] VehicleState stall logic    : OK  displacement=3.0px -> DIAM"
+    },
+    {
+      "ok": true,
+      "msg": "[PASS] [7/8] yt-dlp CLI binary           : OK  v2025.10.14"
+    },
+    {
+      "ok": true,
+      "msg": "[PASS] [8/8] Gemini API connectivity     : OK  20 model Flash tersedia"
+    }
+  ]
+}

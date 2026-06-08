@@ -1,26 +1,32 @@
-FROM python:3.11-slim-bookworm
+FROM python:3.10-slim
 
-# Instal dependensi sistem untuk OpenCV dan SQLite
-RUN apt-get update && apt-get install -y \
+# Install system dependencies for OpenCV (libGL) and general Linux libs
+RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1 \
     libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender-dev \
     ffmpeg \
-    sqlite3 \
     && rm -rf /var/lib/apt/lists/*
 
-# Aturan Wajib Hugging Face: Buat user non-root (UID 1000)
-RUN useradd -m -u 1000 user
-USER user
-ENV PATH="/home/user/.local/bin:$PATH"
+# Set working directory
+WORKDIR /app
 
-WORKDIR /home/user/app
+# Copy requirements first for Docker layer caching
+COPY requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
 
-# Salin requirements dan instal
-COPY --chown=user ./requirements.txt requirements.txt
-RUN pip install --no-cache-dir --upgrade -r requirements.txt
+# Copy application code
+COPY . .
 
-# Salin seluruh kode backend
-COPY --chown=user . /home/user/app
+# Expose Hugging Face Spaces default port
+EXPOSE 7860
 
-# Port wajib Hugging Face
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "7860"]
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:7860/health')" || exit 1
+
+# Start the application
+CMD ["python", "main.py"]

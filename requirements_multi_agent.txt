@@ -1,0 +1,18 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# requirements.txt — NusaRail Intelligence Multi-Agent System
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Computer Vision & YOLO
+ultralytics>=8.2.0          # YOLOv8/v11 + ByteTrack built-in
+opencv-python>=4.8.0        # GUI display & frame processing
+
+# Video Streaming
+yt-dlp>=2024.1.0            # YouTube URL extractor (update otomatis)
+
+# Gemini AI API (SDK terbaru — menggantikan google-generativeai yang deprecated)
+google-genai>=1.0.0         # Client resmi Google AI baru
+pillow>=10.0.0              # Konversi frame untuk Gemini API
+
+# Utilities
+python-dotenv>=1.0.0        # Baca .env file
+numpy>=1.24.0               # Array processing

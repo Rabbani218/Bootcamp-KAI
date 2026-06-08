@@ -1,0 +1,29 @@
+# ────────────────────────────────────────────────────────────────────────────
+# requirements.txt — NusaRail Sentinel v1.0
+# Sistem Peringatan Dini Perlintasan Kereta Api
+# ────────────────────────────────────────────────────────────────────────────
+
+# Computer Vision & Object Detection
+ultralytics>=8.2.0          # YOLOv8/v11 + ByteTrack built-in
+opencv-python>=4.8.0        # VideoCapture, imshow, drawing
+
+# YouTube Stream Extraction
+yt-dlp>=2024.5.0            # Direct URL extractor (selalu update!)
+
+# Google Gemini AI API (SDK terbaru — bukan google-generativeai yang deprecated)
+google-genai>=1.0.0         # pip install google-genai
+
+# Utilities
+python-dotenv>=1.0.0        # Baca .env file
+numpy>=1.24.0               # Array processing
+pillow>=10.0.0              # Konversi frame jika diperlukan
+
+# ────────────────────────────────────────────────────────────────────────────
+# CARA INSTALASI:
+#   pip install -r requirements.txt
+#
+# CARA MENJALANKAN:
+#   python peringatan_dini_ka.py --url "https://www.youtube.com/watch?v=q7lvnYVuqNY"
+#   python peringatan_dini_ka.py --url video.mp4 --device cuda
+#   python peringatan_dini_ka.py --url 0 --no-gemini  (webcam, tanpa Gemini)
+# ────────────────────────────────────────────────────────────────────────────

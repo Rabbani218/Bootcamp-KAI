@@ -1,28 +1,10 @@
-# FastAPI & Web Framework
-fastapi==0.104.1
-uvicorn[standard]==0.24.0
-pydantic==2.5.0
-websockets>=11.0.3
-
-# AI/ML - YOLOv8 Ultralytics (Native .predict() + .plot())
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+python-multipart>=0.0.6
+opencv-python-headless>=4.8.0
+numpy>=1.24.0
 ultralytics>=8.1.0
-opencv-python-headless==4.8.1.78
-numpy>=1.24.3
-Pillow>=10.1.0
-torch>=2.0.0
-torchvision>=0.15.0
-
-# Async & Utility
-python-multipart==0.0.6
-aiofiles==23.2.1
-yt-dlp>=2024.5.0
-
-# Async HTTP
-httpx==0.26.0
-
-# Gemini Vision
-google-genai>=1.0.0
-
-# IoT & Async Extensions
-paho-mqtt
-aiohttp
+yt-dlp>=2024.1.0
+google-generativeai>=0.3.0
+httpx>=0.25.0
+Pillow>=10.0.0
