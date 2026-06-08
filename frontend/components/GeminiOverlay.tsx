@@ -150,6 +150,37 @@ export default function GeminiOverlay({ backendWsUrl, isBackendWakingUp, onWsSta
   // LOGIKA AUDIO WARNING (Menggunakan elemen audio HTML agar ramah kebijakan autoplay)
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
+  // Trik Unlock Audio untuk mengatasi Strict Autoplay Policy Chrome/Safari
+  useEffect(() => {
+    const unlockAudio = () => {
+      if (audioRef.current && audioRef.current.paused) {
+        // Mainkan lalu langsung pause untuk mengaktifkan izin media di browser
+        const p = audioRef.current.play();
+        if (p !== undefined) {
+          p.then(() => {
+            if (audioRef.current) {
+              audioRef.current.pause();
+              audioRef.current.currentTime = 0;
+            }
+          }).catch(() => {
+            // Abaikan error jika masih gagal
+          });
+        }
+      }
+      // Hapus event listener setelah pertama kali di-klik (unlocked)
+      document.removeEventListener('click', unlockAudio);
+      document.removeEventListener('touchstart', unlockAudio);
+    };
+
+    document.addEventListener('click', unlockAudio);
+    document.addEventListener('touchstart', unlockAudio);
+
+    return () => {
+      document.removeEventListener('click', unlockAudio);
+      document.removeEventListener('touchstart', unlockAudio);
+    };
+  }, []);
+
   useEffect(() => {
     if (!audioRef.current) return;
     
