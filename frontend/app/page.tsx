@@ -3,7 +3,7 @@
 import dynamic from 'next/dynamic';
 import { useState, useEffect } from 'react';
 import axios from 'axios';
-import { Youtube, Video, Upload, Activity, Radio, BarChart3, Settings, MonitorPlay } from 'lucide-react';
+import { Youtube, Video, Upload, Activity, Radio, BarChart3, Settings, MonitorPlay, Play } from 'lucide-react';
 
 const VideoStream = dynamic(() => import('@/components/VideoStream'), { ssr: false });
 const GeminiOverlay = dynamic(() => import('@/components/GeminiOverlay'), { ssr: false });
@@ -21,7 +21,7 @@ export default function Home() {
   const backendWsUrl = backendUrl.replace('http', 'ws') + '/ws/telemetry';
   
   const [mainTab, setMainTab] = useState<'monitoring' | 'analytics' | 'settings'>('monitoring');
-  const [sourceTab, setSourceTab] = useState<'youtube' | 'rtsp' | 'upload'>('youtube');
+  const [sourceTab, setSourceTab] = useState<'demo' | 'youtube' | 'rtsp' | 'upload'>('demo');
   
   const [youtubeUrl, setYoutubeUrl] = useState("https://www.youtube.com/watch?v=q7lvnYVuqNY");
   const [rtspUrl, setRtspUrl] = useState("");
@@ -193,7 +193,10 @@ export default function Home() {
           <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
             {/* Input Controls */}
             <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 shadow-xl">
-              <div className="flex gap-4 border-b border-gray-700 pb-4 mb-4">
+              <div className="flex flex-wrap gap-4 border-b border-gray-700 pb-4 mb-4">
+                <button onClick={() => setSourceTab('demo')} className={`flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition ${sourceTab === 'demo' ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-900/50' : 'text-gray-400 hover:text-white bg-gray-800'}`}>
+                  <Play className="w-5 h-5 text-indigo-300" /> Mode Simulasi (Canned Demo)
+                </button>
                 <button onClick={() => setSourceTab('youtube')} className={`flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition ${sourceTab === 'youtube' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white'}`}>
                   <Youtube className="w-5 h-5" /> YouTube Live
                 </button>
@@ -204,6 +207,17 @@ export default function Home() {
                   <Upload className="w-5 h-5" /> Local Video
                 </button>
               </div>
+
+              {sourceTab === 'demo' && (
+                <div className="flex items-center justify-between bg-indigo-950/30 border border-indigo-900/50 rounded-lg p-4 mb-4">
+                  <div>
+                    <h3 className="text-indigo-300 font-medium flex items-center gap-2">
+                      <Play className="w-4 h-4" /> Mode Pra-Render Aktif
+                    </h3>
+                    <p className="text-sm text-gray-400 mt-1">Video presentasi ini berjalan 100% secara lokal dengan Zero-Lag dan anotasi AI yang sudah terkalibrasi.</p>
+                  </div>
+                </div>
+              )}
 
               {sourceTab === 'youtube' && (
                 <form onSubmit={(e) => handleUpdateUrl(e, 'youtube')} className="flex gap-2">
@@ -237,14 +251,26 @@ export default function Home() {
             {/* Main Content Area */}
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
               <div className="lg:col-span-2 space-y-4">
-                <div className="bg-gray-900 border border-gray-800 p-1 rounded-xl shadow-2xl">
-                  <VideoStream 
-                    backendUrl={backendUrl} 
-                    mode={sourceTab} 
-                    streamKey={sourceTab === 'youtube' ? youtubeUrl : (sourceTab === 'rtsp' ? rtspUrl : 'upload')} 
-                    isUpdating={isUpdating}
-                    wsStatus={wsStatus} 
-                  />
+                <div className="bg-gray-900 border border-gray-800 p-1 rounded-xl shadow-2xl overflow-hidden flex justify-center items-center relative aspect-video">
+                  {sourceTab === 'demo' ? (
+                    <video 
+                      src="/demo_nusarail_final.mp4" 
+                      controls 
+                      autoPlay 
+                      loop 
+                      muted 
+                      playsInline 
+                      className="w-full h-full bg-black rounded-lg object-contain"
+                    />
+                  ) : (
+                    <VideoStream 
+                      backendUrl={backendUrl} 
+                      mode={sourceTab as 'youtube' | 'rtsp' | 'upload'} 
+                      streamKey={sourceTab === 'youtube' ? youtubeUrl : (sourceTab === 'rtsp' ? rtspUrl : 'upload')} 
+                      isUpdating={isUpdating}
+                      wsStatus={wsStatus} 
+                    />
+                  )}
                 </div>
               </div>
               <div className="lg:col-span-1">
