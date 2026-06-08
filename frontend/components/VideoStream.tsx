@@ -4,6 +4,9 @@ import React, { useState, useEffect, useRef } from "react";
 
 interface VideoStreamProps {
   backendUrl: string;
+  mode?: string;
+  streamKey?: string;
+  isUpdating?: boolean;
 }
 
 /**
@@ -14,7 +17,7 @@ interface VideoStreamProps {
  * via the 'multipart/x-mixed-replace' content type, requiring zero JavaScript
  * decoding overhead.
  */
-const VideoStream: React.FC<VideoStreamProps> = ({ backendUrl }) => {
+const VideoStream: React.FC<VideoStreamProps> = ({ backendUrl, mode, streamKey, isUpdating }) => {
   const [isLoading, setIsLoading] = useState(true);
   const [hasError, setHasError] = useState(false);
   const [retryCount, setRetryCount] = useState(0);
@@ -65,7 +68,7 @@ const VideoStream: React.FC<VideoStreamProps> = ({ backendUrl }) => {
       {/* MJPEG Stream via <img> tag */}
       <img
         ref={imgRef}
-        key={retryCount} // Force remount on retry
+        key={`${streamKey}-${retryCount}`} // Force remount on retry or URL change
         src={streamUrl}
         alt="NusaRail MJPEG Live Feed"
         className="w-full h-full object-contain"
