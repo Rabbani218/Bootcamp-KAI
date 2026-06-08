@@ -89,11 +89,20 @@ class StreamHandler:
         consecutive_failures = 0
         max_failures = 300  # ~10 seconds at 30fps
 
+        # CRITICAL FIX 13: Accurate Video Playback Speed (Anti-Lag)
+        fps = 30.0
+        if self._mode == "upload" and self._cap is not None:
+            fps = self._cap.get(cv2.CAP_PROP_FPS)
+            if fps <= 0 or fps > 120:
+                fps = 30.0
+        frame_delay = 1.0 / fps
+
         while self._running:
             if self._cap is None or not self._cap.isOpened():
                 time.sleep(0.1)
                 continue
 
+            start_time = time.time()
             ret, frame = self._cap.read()
 
             if not ret:
@@ -116,8 +125,13 @@ class StreamHandler:
             with self._lock:
                 self._latest_frame = frame
 
-            # Throttle to ~30 FPS to prevent CPU saturation
-            time.sleep(1 / 30)
+            # CRITICAL FIX 13: Throttle ONLY for upload mode to maintain original FPS
+            # Live streams (youtube/rtsp) will block naturally at cv2.read(), so NO sleep!
+            if self._mode == "upload":
+                elapsed = time.time() - start_time
+                sleep_time = frame_delay - elapsed
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
 
         log.info("[Producer] Thread terminated.")
 

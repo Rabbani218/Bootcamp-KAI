@@ -242,7 +242,12 @@ def _mjpeg_generator():
     Generator that yields MJPEG frames as multipart HTTP chunks.
     Uses the annotated frame produced by the AI worker thread.
     """
+    target_fps = 30.0
+    frame_delay = 1.0 / target_fps
+
     while True:
+        start_time = time.time()
+        
         frame = None
         with _annotated_frame_lock:
             if _annotated_frame is not None:
@@ -264,7 +269,12 @@ def _mjpeg_generator():
             b"--frame\r\n"
             b"Content-Type: image/jpeg\r\n\r\n" + jpeg.tobytes() + b"\r\n"
         )
-        time.sleep(1 / 30)
+        
+        # Calculate accurate sleep time to maintain exactly 30 FPS
+        elapsed = time.time() - start_time
+        sleep_time = frame_delay - elapsed
+        if sleep_time > 0:
+            time.sleep(sleep_time)
 
 
 @app.get("/video_feed")
