@@ -42,7 +42,7 @@ log = logging.getLogger("nusarail.vision")
 STUCK_DISTANCE_PX = 50       # CRITICAL FIX 14: Increased to 50 for accurate bounding box jitter tolerance
 STUCK_DURATION_SEC = 5.0      # Seconds before a stationary vehicle is flagged
 DJKA_COOLDOWN_SEC = 60.0      # CRITICAL FIX 08: Debounce interval
-CONFIDENCE_THRESHOLD = 0.15   # CRITICAL FIX 04: Low threshold for night recall
+CONFIDENCE_THRESHOLD = 0.35   # CRITICAL FIX: Increased to 0.35 to prevent hallucination
 MIN_AREA_PX = 1500            # ANTI-TROLLING: Ignore tiny objects (toys)
 MAX_AREA_PX = 250000          # ANTI-TROLLING: Ignore massive objects (close-up phone pictures)
 
@@ -186,19 +186,18 @@ class VisionEngine:
 
             # Label
             id_str = f" ID:{tid}" if tid is not None else ""
-            label = f"{cls_name}{id_str} {conf:.2f}"
-            if det.get("is_ghost"):
-                label = f"{cls_name}{id_str} OCCLUDED!"
+            label = f"{cls_name} {conf:.2f}"
+            
             if evacuating:
-                label += " EVAKUASI MANUAL!"
+                label += " EVAKUASI!"
             elif stuck:
                 label += " MOGOK!"
 
-            label_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)[0]
+            label_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)[0]
             cv2.rectangle(frame_copy, (x1, y1 - label_size[1] - 10),
                           (x1 + label_size[0], y1), color, -1)
             cv2.putText(frame_copy, label, (x1, y1 - 5),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
         # 4. Emergency Alerts & DJKA Trigger
         # CRITICAL FIX 14: Dynamic HUD Overlay & Accurate Warning Logic
@@ -386,12 +385,10 @@ class VisionEngine:
                             
                             # CRITICAL FIX 13: Temporal Smoothing (Ghost Vehicle)
                             should_render_ghost = False
-                            if is_critical and time_unseen <= 5.0:
-                                should_render_ghost = True
-                            elif not is_critical and time_unseen <= 3.0:
+                            if time_unseen <= 1.5:
                                 should_render_ghost = True
                             
-                            if time_unseen > 10.0:
+                            if time_unseen > 1.5:
                                 stale_ids.append(tid)
                             elif should_render_ghost:
                                 if is_critical:
