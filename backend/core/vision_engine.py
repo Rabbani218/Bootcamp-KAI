@@ -38,9 +38,12 @@ log = logging.getLogger("nusarail.vision")
 # COCO class mapping for target classes
 # ---------------------------------------------------------------------------
 NUSA_RAIL_CLASSES = {
-    0: "car",
-    1: "motorcycle",
-    2: "train",
+    0: "person",
+    2: "car",
+    3: "motorcycle",
+    5: "bus",
+    6: "train",
+    7: "truck",
 }
 
 # Threshold constants
@@ -256,7 +259,7 @@ class VisionEngine:
                 source=frame,
                 persist=True,
                 tracker="bytetrack.yaml",
-                classes=[0, 1, 2],
+                classes=[0, 2, 3, 5, 6, 7],
                 conf=CONFIDENCE_THRESHOLD,
                 iou=0.5,
                 verbose=False,
@@ -284,13 +287,7 @@ class VisionEngine:
                         cls_id = int(box.cls[0])
                         cls_name = NUSA_RAIL_CLASSES.get(cls_id, f"class_{cls_id}")
 
-                        # 1. PERBAIKAN: Filter Kepercayaan Khusus
-                        if cls_name == "car" and conf < 0.4:
-                            continue
-                        if cls_name == "motorcycle" and conf < 0.3:
-                            continue
-                        if cls_name == "train" and conf < 0.5:
-                            continue
+                        # (Custom confidence filters removed to allow conf=0.15 for night recall)
 
                         cx = int((x1 + x2) / 2)
                         cy = int((y1 + y2) / 2)
@@ -311,8 +308,8 @@ class VisionEngine:
 
                     active_ids = set()
                     
-                    person_detections = []
-                    vehicle_detections = [d for d in raw_detections if d["cls_name"] in ("car", "motorcycle")]
+                    person_detections = [d for d in raw_detections if d["cls_name"] == "person"]
+                    vehicle_detections = [d for d in raw_detections if d["cls_name"] in ("car", "motorcycle", "bus", "truck")]
 
                     for v_det in vehicle_detections:
                         tid = v_det["track_id"]
@@ -357,11 +354,11 @@ class VisionEngine:
                             else:
                                 det["is_evacuating"] = getattr(tv, 'is_evacuating', False)
 
-                            if tv.is_stuck and det["cls_name"] in ("car", "motorcycle"):
+                            if tv.is_stuck and det["cls_name"] in ("car", "motorcycle", "bus", "truck"):
                                 is_car_stuck = True
                                 stuck_vehicles.append(tid)
 
-                            if det.get("is_evacuating", False) and det["cls_name"] in ("car", "motorcycle"):
+                            if det.get("is_evacuating", False) and det["cls_name"] in ("car", "motorcycle", "bus", "truck"):
                                 is_evacuation_active = True
 
                         if det["cls_name"] == "train":
