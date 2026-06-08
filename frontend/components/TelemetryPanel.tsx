@@ -52,8 +52,9 @@ const TelemetryPanel: React.FC<TelemetryPanelProps> = ({ backendUrl }) => {
   // CRITICAL FIX 01: Auto-Reconnect with Exponential Backoff
   // ----------------------------------------------------------------
   const connectWebSocket = useCallback(() => {
-    // Build WebSocket URL from backend HTTP URL
-    const wsUrl = backendUrl
+    // CRITICAL FIX 10: Cross-Origin Unblocking & Cache Busting
+    let cleanBackendUrl = backendUrl.replace(/\/$/, ""); // hapus trailing slash
+    const wsUrl = cleanBackendUrl
       .replace("https://", "wss://")
       .replace("http://", "ws://")
       + "/ws/telemetry";

@@ -29,24 +29,8 @@ const nextConfig = {
       "https://alex-universe11-bootcamp-ubsi-kai.hf.space",
   },
 
-  // Headers for cross-origin compatibility
-  async headers() {
-    return [
-      {
-        source: "/(.*)",
-        headers: [
-          {
-            key: "Cross-Origin-Embedder-Policy",
-            value: "credentialless",
-          },
-          {
-            key: "Cross-Origin-Opener-Policy",
-            value: "same-origin",
-          },
-        ],
-      },
-    ];
-  },
+  // CRITICAL FIX 10: Cross-Origin Unblocking & Cache Busting
+  // Blok async headers() dihapus sepenuhnya untuk mengizinkan stream MJPEG (multipart/x-mixed-replace) dari Hugging Face
 
   // Webpack configuration for client-side optimization
   webpack: (config, { isServer }) => {

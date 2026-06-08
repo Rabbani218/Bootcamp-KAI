@@ -20,7 +20,8 @@ const VideoStream: React.FC<VideoStreamProps> = ({ backendUrl }) => {
   const [retryCount, setRetryCount] = useState(0);
   const imgRef = useRef<HTMLImageElement>(null);
 
-  const streamUrl = `${backendUrl}/video_feed`;
+  // CRITICAL FIX 10: Cross-Origin Unblocking & Cache Busting
+  const streamUrl = `${backendUrl}/video_feed?t=${Date.now()}`;
 
   useEffect(() => {
     // Auto-retry on error (handles Hugging Face cold starts)
