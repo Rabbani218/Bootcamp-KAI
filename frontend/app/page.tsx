@@ -30,6 +30,11 @@ export default function Home() {
   const [healthInfo, setHealthInfo] = useState({ djka_connected: false, mqtt_connected: false });
   const [isDanger, setIsDanger] = useState(false);
 
+  // CRITICAL FIX 11: Real-time Sync & Cold Start Resiliency
+  const [wsStatus, setWsStatus] = useState<'connected' | 'disconnected'>('disconnected');
+  const [isBackendWakingUp, setIsBackendWakingUp] = useState(false);
+  const [streamActive, setStreamActive] = useState(false);
+
   useEffect(() => {
     const fetchHealthAndStatus = async () => {
       try {
@@ -37,6 +42,12 @@ export default function Home() {
           fetch(`${backendUrl}/health`).catch(() => null),
           fetch(`${backendUrl}/`).catch(() => null)
         ]);
+
+        if (!healthRes && !statusRes) {
+          setIsBackendWakingUp(true);
+        } else {
+          setIsBackendWakingUp(false);
+        }
 
         if (healthRes) {
           const healthData = await healthRes.json();
@@ -49,12 +60,23 @@ export default function Home() {
         if (statusRes) {
           const statusData = await statusRes.json();
           setIsDanger(statusData.danger || false);
+          
+          // CRITICAL FIX 11: Sinkronisasi UI dan Backend
+          if (statusData.stream_active === false && streamActive === true) {
+            console.log("[Sync] Backend idle, reseting UI streamActive state.");
+            setStreamActive(false);
+          } else if (statusData.stream_active === true && streamActive === false) {
+            setStreamActive(true);
+          }
         }
-      } catch (err) {}
+      } catch (err) {
+        setIsBackendWakingUp(true);
+      }
     };
 
     fetchHealthAndStatus();
-    const iv = setInterval(fetchHealthAndStatus, 2000);
+    // CRITICAL FIX 11: Polling setiap 5 detik
+    const iv = setInterval(fetchHealthAndStatus, 5000);
     return () => clearInterval(iv);
   }, [backendUrl]);
 
@@ -215,11 +237,21 @@ export default function Home() {
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
               <div className="lg:col-span-2 space-y-4">
                 <div className="bg-gray-900 border border-gray-800 p-1 rounded-xl shadow-2xl">
-                  <VideoStream backendUrl={backendUrl} mode={sourceTab} streamKey={sourceTab === 'youtube' ? youtubeUrl : (sourceTab === 'rtsp' ? rtspUrl : 'upload')} isUpdating={isUpdating} />
+                  <VideoStream 
+                    backendUrl={backendUrl} 
+                    mode={sourceTab} 
+                    streamKey={sourceTab === 'youtube' ? youtubeUrl : (sourceTab === 'rtsp' ? rtspUrl : 'upload')} 
+                    isUpdating={isUpdating}
+                    wsStatus={wsStatus} 
+                  />
                 </div>
               </div>
               <div className="lg:col-span-1">
-                <GeminiOverlay backendWsUrl={backendWsUrl} />
+                <GeminiOverlay 
+                  backendWsUrl={backendWsUrl} 
+                  isBackendWakingUp={isBackendWakingUp}
+                  onWsStatusChange={(status) => setWsStatus(status)}
+                />
               </div>
             </div>
           </div>

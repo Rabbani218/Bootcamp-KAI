@@ -7,6 +7,7 @@ interface VideoStreamProps {
   mode?: string;
   streamKey?: string;
   isUpdating?: boolean;
+  wsStatus?: 'connected' | 'disconnected';
 }
 
 /**
@@ -17,7 +18,7 @@ interface VideoStreamProps {
  * via the 'multipart/x-mixed-replace' content type, requiring zero JavaScript
  * decoding overhead.
  */
-const VideoStream: React.FC<VideoStreamProps> = ({ backendUrl, mode, streamKey, isUpdating }) => {
+const VideoStream: React.FC<VideoStreamProps> = ({ backendUrl, mode, streamKey, isUpdating, wsStatus }) => {
   const [isLoading, setIsLoading] = useState(true);
   const [hasError, setHasError] = useState(false);
   const [retryCount, setRetryCount] = useState(0);
@@ -25,6 +26,16 @@ const VideoStream: React.FC<VideoStreamProps> = ({ backendUrl, mode, streamKey, 
 
   // CRITICAL FIX 10: Cross-Origin Unblocking & Cache Busting
   const streamUrl = `${backendUrl}/video_feed?t=${Date.now()}`;
+
+  // CRITICAL FIX 11: Real-time Sync & Cold Start Resiliency
+  useEffect(() => {
+    if (wsStatus === 'disconnected') {
+      console.log("[VideoStream] WS Disconnected detected. Forcing stream refresh.");
+      setRetryCount((prev) => prev + 1);
+      setIsLoading(true);
+      setHasError(false);
+    }
+  }, [wsStatus]);
 
   useEffect(() => {
     // Auto-retry on error (handles Hugging Face cold starts)
@@ -72,6 +83,8 @@ const VideoStream: React.FC<VideoStreamProps> = ({ backendUrl, mode, streamKey, 
         src={streamUrl}
         alt="NusaRail MJPEG Live Feed"
         className="w-full h-full object-contain"
+        loading="eager"
+        decoding="async"
         onLoad={() => setIsLoading(false)}
         onError={() => {
           setIsLoading(false);

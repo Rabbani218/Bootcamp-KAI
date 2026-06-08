@@ -11,9 +11,11 @@ interface GeminiReport {
 
 interface GeminiOverlayProps {
   backendWsUrl: string;
+  isBackendWakingUp?: boolean;
+  onWsStatusChange?: (status: 'connected' | 'disconnected') => void;
 }
 
-export default function GeminiOverlay({ backendWsUrl }: GeminiOverlayProps) {
+export default function GeminiOverlay({ backendWsUrl, isBackendWakingUp, onWsStatusChange }: GeminiOverlayProps) {
   const [report, setReport] = useState<GeminiReport>({
     status: "MENGINISIALISASI",
     lokasi: "Menghubungkan ke AI...",
@@ -23,6 +25,7 @@ export default function GeminiOverlay({ backendWsUrl }: GeminiOverlayProps) {
   const [lastUpdate, setLastUpdate] = useState<Date | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<NodeJS.Timeout | null>(null);
+  const retryCount = useRef(0);
 
   useEffect(() => {
     const connect = () => {
@@ -39,6 +42,8 @@ export default function GeminiOverlay({ backendWsUrl }: GeminiOverlayProps) {
       ws.onopen = () => {
         console.log("[GeminiOverlay] WebSocket connected ✅");
         setConnected(true);
+        retryCount.current = 0; // Reset
+        if (onWsStatusChange) onWsStatusChange('connected');
         // Kirim ping ke server untuk meminta data terbaru
         try { ws.send("ping"); } catch {}
       };
@@ -67,10 +72,16 @@ export default function GeminiOverlay({ backendWsUrl }: GeminiOverlayProps) {
       };
 
       ws.onclose = (event) => {
-        console.log(`[GeminiOverlay] Disconnected (code=${event.code}). Reconnect in 5s...`);
         setConnected(false);
-        // Auto-reconnect setelah 5 detik
-        reconnectTimer.current = setTimeout(connect, 5000);
+        if (onWsStatusChange) onWsStatusChange('disconnected');
+        
+        // CRITICAL FIX 11: Exponential Backoff (Maks 10s)
+        retryCount.current += 1;
+        const delay = retryCount.current >= 3 ? 10000 : Math.pow(2, retryCount.current) * 1000;
+        
+        console.log(`[GeminiOverlay] Disconnected (code=${event.code}). Reconnect attempt ${retryCount.current} in ${delay/1000}s...`);
+        // Auto-reconnect
+        reconnectTimer.current = setTimeout(connect, delay);
       };
 
       ws.onerror = (err) => {
@@ -121,6 +132,22 @@ export default function GeminiOverlay({ backendWsUrl }: GeminiOverlayProps) {
           {connected ? 'WS Connected' : 'WS Disconnected'}
         </div>
       </div>
+
+      {/* CRITICAL FIX 11: Cold Start UI */}
+      {isBackendWakingUp && (
+        <div className="mb-4 bg-blue-900/40 border border-blue-700/50 p-3 rounded-lg shadow-inner">
+          <p className="text-blue-300 text-xs font-mono font-semibold mb-2 flex items-center gap-2">
+            <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            </svg>
+            Menunggu Server Bangun (Cold Start)...
+          </p>
+          <div className="w-full bg-gray-800 rounded-full h-1.5 overflow-hidden relative">
+            <div className="bg-blue-500 h-1.5 rounded-full w-full absolute animate-[progress_2s_ease-in-out_infinite] origin-left"></div>
+          </div>
+        </div>
+      )}
 
       <div className="flex-1 overflow-y-auto pr-1 space-y-5">
 
