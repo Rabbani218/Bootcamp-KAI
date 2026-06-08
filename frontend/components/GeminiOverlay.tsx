@@ -143,9 +143,37 @@ export default function GeminiOverlay({ backendWsUrl, isBackendWakingUp, onWsSta
   }, [backendWsUrl]);
 
   // Deteksi tipe status untuk styling
-  const isDanger      = report.status?.toUpperCase().includes("BAHAYA");
+  const isDanger      = report.status?.toUpperCase().includes("BAHAYA") || report.status?.toUpperCase().includes("DARURAT");
   const isStationary  = report.status?.includes("TERJEBAK");
   const isInitializing = report.status?.toUpperCase().includes("MENGINISIALISASI");
+
+  // LOGIKA AUDIO WARNING
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined' && !audioRef.current) {
+      audioRef.current = new Audio('/Warning.mp3');
+      audioRef.current.loop = true;
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!audioRef.current) return;
+    
+    if (isDanger) {
+      audioRef.current.play().catch(e => console.error("[Audio] Autoplay diblokir browser:", e));
+    } else {
+      audioRef.current.pause();
+      audioRef.current.currentTime = 0;
+    }
+
+    return () => {
+      // Hentikan audio saat komponen unmount
+      if (audioRef.current) {
+        audioRef.current.pause();
+      }
+    };
+  }, [isDanger]);
 
   // Warna status badge
   const badgeClass = isDanger
