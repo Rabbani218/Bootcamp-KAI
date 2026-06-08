@@ -29,6 +29,7 @@ export default function Home() {
   const [isUpdating, setIsUpdating] = useState(false);
   const [healthInfo, setHealthInfo] = useState({ djka_connected: false, mqtt_connected: false });
   const [isDanger, setIsDanger] = useState(false);
+  const [demoVideoDanger, setDemoVideoDanger] = useState(false);
 
   // CRITICAL FIX 11: Real-time Sync & Cold Start Resiliency
   const [wsStatus, setWsStatus] = useState<'connected' | 'disconnected'>('disconnected');
@@ -261,6 +262,10 @@ export default function Home() {
                       muted 
                       playsInline 
                       className="w-full h-full bg-black rounded-lg object-contain"
+                      onTimeUpdate={(e) => {
+                        const time = (e.target as HTMLVideoElement).currentTime;
+                        setDemoVideoDanger(time > 5.0);
+                      }}
                     />
                   ) : (
                     <VideoStream 
@@ -278,6 +283,8 @@ export default function Home() {
                   backendWsUrl={backendWsUrl} 
                   isBackendWakingUp={isBackendWakingUp}
                   onWsStatusChange={(status) => setWsStatus(status)}
+                  isDemoMode={sourceTab === 'demo'}
+                  demoVideoDanger={demoVideoDanger}
                 />
               </div>
             </div>

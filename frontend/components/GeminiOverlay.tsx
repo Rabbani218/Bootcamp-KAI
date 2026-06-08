@@ -14,9 +14,10 @@ interface GeminiOverlayProps {
   isBackendWakingUp?: boolean;
   onWsStatusChange?: (status: 'connected' | 'disconnected') => void;
   isDemoMode?: boolean;
+  demoVideoDanger?: boolean;
 }
 
-export default function GeminiOverlay({ backendWsUrl, isBackendWakingUp, onWsStatusChange, isDemoMode }: GeminiOverlayProps) {
+export default function GeminiOverlay({ backendWsUrl, isBackendWakingUp, onWsStatusChange, isDemoMode, demoVideoDanger }: GeminiOverlayProps) {
   const [report, setReport] = useState<GeminiReport>({
     status: "MENGINISIALISASI",
     lokasi: "Menghubungkan ke AI...",
@@ -28,7 +29,7 @@ export default function GeminiOverlay({ backendWsUrl, isBackendWakingUp, onWsSta
   const reconnectTimer = useRef<NodeJS.Timeout | null>(null);
   const retryCount = useRef(0);
 
-  // LOGIKA SIMULASI MODE DEMO
+  // LOGIKA SIMULASI MODE DEMO BERSINKRONISASI SEMPURNA DENGAN VIDEO
   useEffect(() => {
     if (!isDemoMode) return;
 
@@ -36,28 +37,24 @@ export default function GeminiOverlay({ backendWsUrl, isBackendWakingUp, onWsSta
     setConnected(true);
     if (onWsStatusChange) onWsStatusChange('connected');
 
-    // Detik 0-5: Kondisi Aman
-    setReport({
-      status: "AMAN",
-      lokasi: "Stasiun Duren Kalibata (Jalur Bogor - Jakarta Kota)",
-      narasi: "Jalur ini aman, tidak ada tanda bahaya di sini.",
-      timestamp: Math.floor(Date.now() / 1000)
-    });
-    setLastUpdate(new Date());
-
-    // Detik 5+: Bahaya! Sama persis dengan kemunculan red banner di video demo
-    const dangerTimer = setTimeout(() => {
+    if (demoVideoDanger) {
       setReport({
         status: "DARURAT_KRITIS: KENDARAAN TERJEBAK",
         lokasi: "Stasiun Duren Kalibata (Jalur Bogor - Jakarta Kota)",
         narasi: "Jalur ini bahaya. Mengirimkan pesan peringatan ke DJKA untuk memberlakukan semboyan (sinyal merah terdekat) dan rem darurat pada rangkaian KRL untuk melakukan pengereman darurat.",
         timestamp: Math.floor(Date.now() / 1000)
       });
-      setLastUpdate(new Date());
-    }, 5000);
+    } else {
+      setReport({
+        status: "AMAN",
+        lokasi: "Stasiun Duren Kalibata (Jalur Bogor - Jakarta Kota)",
+        narasi: "Jalur ini aman, tidak ada tanda bahaya di sini.",
+        timestamp: Math.floor(Date.now() / 1000)
+      });
+    }
+    setLastUpdate(new Date());
 
-    return () => clearTimeout(dangerTimer);
-  }, [isDemoMode]);
+  }, [isDemoMode, demoVideoDanger]);
 
   useEffect(() => {
     const connect = () => {
@@ -90,19 +87,11 @@ export default function GeminiOverlay({ backendWsUrl, isBackendWakingUp, onWsSta
           const data = JSON.parse(event.data) as GeminiReport;
           console.log("[GeminiOverlay] Data diterima:", data);
 
-          const currentStatus = data.status || "AMAN";
-          const isDangerStatus = currentStatus.toUpperCase().includes("BAHAYA") || currentStatus.toUpperCase().includes("DARURAT");
-
-          const forcedLokasi = "Stasiun Duren Kalibata (Jalur Bogor - Jakarta Kota)";
-          const forcedNarasi = isDangerStatus 
-              ? "Jalur ini bahaya. Mengirimkan pesan peringatan ke DJKA untuk memberlakukan semboyan (sinyal merah terdekat) dan rem darurat pada rangkaian KRL untuk melakukan pengereman darurat."
-              : "Jalur ini aman, tidak ada tanda bahaya di sini.";
-
-          // Update SEMUA state dari data server secara langsung dengan override demo
+          // Update SEMUA state dari data server secara langsung (Tanpa Override)
           setReport({
-            status:    currentStatus,
-            lokasi:    forcedLokasi,
-            narasi:    forcedNarasi,
+            status:    data.status    || "AMAN",
+            lokasi:    data.lokasi    || "Tidak dikenali",
+            narasi:    data.narasi    || "Tidak ada narasi.",
             timestamp: data.timestamp,
           });
           setLastUpdate(new Date());
