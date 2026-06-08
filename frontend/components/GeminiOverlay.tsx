@@ -31,7 +31,17 @@ export default function GeminiOverlay({ backendWsUrl, isBackendWakingUp, onWsSta
 
   // LOGIKA SIMULASI MODE DEMO BERSINKRONISASI SEMPURNA DENGAN VIDEO
   useEffect(() => {
-    if (!isDemoMode) return;
+    if (!isDemoMode) {
+      // BERSENJATA: Jika pengguna keluar dari mode Demo ke mode lain (Live/Upload),
+      // kita harus segera MENGHAPUS jejak data kalibata dari layar sebelum data WS baru datang!
+      setReport(prev => ({
+        ...prev,
+        status: "MENGINISIALISASI",
+        lokasi: "Menunggu data AI...",
+        narasi: "Menunggu stream terhubung..."
+      }));
+      return;
+    }
 
     // Paksa status ke Connected untuk UI
     setConnected(true);
