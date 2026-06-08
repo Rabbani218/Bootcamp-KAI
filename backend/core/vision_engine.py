@@ -35,16 +35,8 @@ except ImportError:
 log = logging.getLogger("nusarail.vision")
 
 # ---------------------------------------------------------------------------
-# COCO class mapping for target classes
+# CRITICAL FIX 15: Absolute Class Synchronization (Removed Hardcoded Dict)
 # ---------------------------------------------------------------------------
-NUSA_RAIL_CLASSES = {
-    0: "person",
-    2: "car",
-    3: "motorcycle",
-    5: "bus",
-    6: "train",
-    7: "truck",
-}
 
 # Threshold constants
 STUCK_DISTANCE_PX = 50       # CRITICAL FIX 14: Increased to 50 for accurate bounding box jitter tolerance
@@ -114,6 +106,8 @@ class VisionEngine:
         if YOLO is None:
             raise ImportError("ultralytics is not installed.")
         self._model = YOLO(model_path)
+        # CRITICAL FIX 15: Ambil nama kelas dinamis langsung dari Custom Weights!
+        self.class_names = self._model.names
         self._tracked_vehicles: Dict[int, TrackedVehicle] = {}
         self._evacuation_timers: Dict[int, float] = {}  # CRITICAL FIX 09: Human Evacuation & Occlusion Guard
         self._last_emergency_time: float = 0.0
@@ -272,13 +266,12 @@ class VisionEngine:
 
             self._frame_count += 1
             
-            # --- START YOLOv8 INFERENCE ---
-            # CRITICAL FIX 13: NMS & Temporal Smoothing untuk Akurasi Objek
+            # CRITICAL FIX 15: Absolute Class Synchronization & Unfiltering
+            # HAPUS filter classes=[...] agar custom model bisa melihat 100% objeknya
             results = self._model.track(
                 source=frame,
                 persist=True,
                 tracker="bytetrack.yaml",
-                classes=[0, 2, 3, 5, 6, 7],
                 conf=CONFIDENCE_THRESHOLD,
                 iou=0.45,
                 verbose=False,
@@ -304,7 +297,8 @@ class VisionEngine:
                         x1, y1, x2, y2 = box.xyxy[0].cpu().numpy().astype(int)
                         conf = float(box.conf[0])
                         cls_id = int(box.cls[0])
-                        cls_name = NUSA_RAIL_CLASSES.get(cls_id, f"class_{cls_id}")
+                        # CRITICAL FIX 15: Ambil nama dari weights asli
+                        cls_name = self.class_names.get(cls_id, f"class_{cls_id}")
 
                         # (Custom confidence filters removed to allow conf=0.15 for night recall)
 
@@ -407,7 +401,7 @@ class VisionEngine:
                                 
                                 raw_detections.append({
                                     "x1": tv.last_cx - 50, "y1": tv.last_cy - 50, "x2": tv.last_cx + 50, "y2": tv.last_cy + 50,
-                                    "conf": 0.0, "cls_id": tv.class_id, "cls_name": NUSA_RAIL_CLASSES.get(tv.class_id, "ghost"),
+                                    "conf": 0.0, "cls_id": tv.class_id, "cls_name": self.class_names.get(tv.class_id, "ghost"),
                                     "cx": tv.last_cx, "cy": tv.last_cy, "area": 10000, "track_id": tid,
                                     "is_stuck": getattr(tv, 'is_stuck', False), "is_evacuating": getattr(tv, 'is_evacuating', False),
                                     "is_ghost": True
