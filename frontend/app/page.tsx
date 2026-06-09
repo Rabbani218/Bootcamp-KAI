@@ -198,14 +198,16 @@ export default function Home() {
                 <button onClick={() => setSourceTab('demo')} className={`flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition ${sourceTab === 'demo' ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-900/50' : 'text-gray-400 hover:text-white bg-gray-800'}`}>
                   <Play className="w-5 h-5 text-indigo-300" /> Mode Simulasi (Canned Demo)
                 </button>
-                <button onClick={() => setSourceTab('youtube')} className={`flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition ${sourceTab === 'youtube' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white'}`}>
-                  <Youtube className="w-5 h-5" /> YouTube Live
+                {/* DEBUG LOCKDOWN: Matikan sementara YouTube & Local Video */}
+                <button disabled onClick={() => {}} className="flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition opacity-50 cursor-not-allowed text-gray-500">
+                  <Youtube className="w-5 h-5" /> YouTube Live <span className="text-[10px] text-red-400 ml-1">(Disabled for Testing)</span>
                 </button>
                 <button onClick={() => setSourceTab('rtsp')} className={`flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition ${sourceTab === 'rtsp' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white'}`}>
                   <Radio className="w-5 h-5" /> RTSP CCTV
                 </button>
-                <button onClick={() => setSourceTab('upload')} className={`flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition ${sourceTab === 'upload' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white'}`}>
-                  <Upload className="w-5 h-5" /> Local Video
+                {/* DEBUG LOCKDOWN: Matikan sementara YouTube & Local Video */}
+                <button disabled onClick={() => {}} className="flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition opacity-50 cursor-not-allowed text-gray-500">
+                  <Upload className="w-5 h-5" /> Local Video <span className="text-[10px] text-red-400 ml-1">(Disabled for Testing)</span>
                 </button>
               </div>
 
@@ -236,7 +238,8 @@ export default function Home() {
 
               {sourceTab === 'upload' && (
                 <div className="flex items-center gap-4">
-                  <input type="file" accept="video/mp4,video/x-m4v,video/*" onChange={handleFileUpload} disabled={isUpdating} className="block w-full text-sm text-gray-400 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-blue-600 file:text-white hover:file:bg-blue-700 disabled:opacity-50" />
+                  {/* DEBUG LOCKDOWN: Matikan sementara Local Video */}
+                  <input type="file" accept="video/mp4,video/x-m4v,video/*" onChange={handleFileUpload} disabled={true} className="block w-full text-sm text-gray-400 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-blue-600 file:text-white hover:file:bg-blue-700 opacity-50 cursor-not-allowed" />
                   {isUpdating && uploadProgress > 0 && (
                     <div className="flex-1">
                       <div className="w-full bg-gray-700 rounded-full h-2.5">

@@ -185,6 +185,12 @@ async def health():
 @app.post("/start/youtube")
 async def start_youtube(url: str = Form(...)):
     """Start streaming from a YouTube URL."""
+    # DEBUG LOCKDOWN: Matikan sementara YouTube & Local Video
+    return JSONResponse(
+        status_code=403,
+        content={"status": "error", "message": "Fitur YouTube dan Local Video sedang dimatikan sementara untuk fase debugging. Silakan gunakan mode Simulasi atau Webcam."}
+    )
+
     success = stream_handler.start_youtube(url)
     if not success:
         return JSONResponse(status_code=400, content={"error": "Failed to start YouTube stream."})
@@ -202,6 +208,12 @@ async def start_youtube(url: str = Form(...)):
 @app.post("/start/upload")
 async def start_upload(file: UploadFile = File(...)):
     """Start streaming from an uploaded video file."""
+    # DEBUG LOCKDOWN: Matikan sementara YouTube & Local Video
+    return JSONResponse(
+        status_code=403,
+        content={"status": "error", "message": "Fitur YouTube dan Local Video sedang dimatikan sementara untuk fase debugging. Silakan gunakan mode Simulasi atau Webcam."}
+    )
+
     # Save uploaded file temporarily
     temp_dir = "temp"
     os.makedirs(temp_dir, exist_ok=True)
