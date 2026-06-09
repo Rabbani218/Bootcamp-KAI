@@ -109,56 +109,10 @@ export default function AdvancedSettings({
   return (
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
       
-      {/* Geo-Fencing Panel */}
-      <div className="bg-gray-900 border border-gray-800 p-6 rounded-xl shadow-lg">
-        <h3 className="text-xl font-bold text-white mb-2 flex items-center gap-2">
-          <Map className="w-6 h-6 text-blue-400" />
-          Geo-Fencing (Zona Bahaya)
-        </h3>
-        <p className="text-gray-400 text-sm mb-6">
-          Tentukan poligon 4-titik (format relatif 0.0 - 1.0) untuk mendefinisikan area perlintasan kereta. YOLO AI hanya akan memicu peringatan jika kendaraan berada di dalam zona ini.
-        </p>
-
-        <form onSubmit={handleSavePolygon} className="space-y-4">
-          <div className="grid grid-cols-2 gap-4">
-            {polygon.map((pt, i) => (
-              <div key={i} className="bg-gray-800/50 p-3 rounded-lg border border-gray-700">
-                <div className="text-xs text-gray-500 font-medium mb-2">Titik {i + 1}</div>
-                <div className="flex gap-2">
-                  <div>
-                    <label className="text-xs text-gray-400 block mb-1">X (0-1)</label>
-                    <input 
-                      type="number" step="0.01" min="0" max="1" required
-                      value={pt.x} onChange={(e) => handlePointChange(i, 'x', e.target.value)}
-                      className="w-full bg-gray-900 border border-gray-700 rounded px-2 py-1 text-sm text-white focus:border-blue-500"
-                    />
-                  </div>
-                  <div>
-                    <label className="text-xs text-gray-400 block mb-1">Y (0-1)</label>
-                    <input 
-                      type="number" step="0.01" min="0" max="1" required
-                      value={pt.y} onChange={(e) => handlePointChange(i, 'y', e.target.value)}
-                      className="w-full bg-gray-900 border border-gray-700 rounded px-2 py-1 text-sm text-white focus:border-blue-500"
-                    />
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-          
-          <button 
-            type="submit" disabled={isSavingPoly}
-            className="w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 rounded-lg transition flex items-center justify-center gap-2 disabled:opacity-50"
-          >
-            <Save className="w-4 h-4" />
-            {isSavingPoly ? 'Menyimpan...' : 'Terapkan Zona Bahaya'}
-          </button>
-        </form>
-      </div>
-
+      {/* KIRI: Panel Utama Baru */}
       <div className="space-y-6">
         {/* FEATURE UPDATE: Dynamic UI Toggles for Canned Demo */}
-        <div className="bg-gray-900 border border-gray-800 p-6 rounded-xl shadow-lg">
+        <div className="bg-gray-900 border border-blue-800 p-6 rounded-xl shadow-lg shadow-blue-900/20">
           <h3 className="text-xl font-bold text-white mb-2 flex items-center gap-2">
             <MonitorPlay className="w-6 h-6 text-blue-400" />
             Kontrol Fitur Demo (Video Source)
@@ -208,6 +162,56 @@ export default function AdvancedSettings({
             </div>
           </div>
         </div>
+
+        {/* Geo-Fencing Panel */}
+        <div className="bg-gray-900 border border-gray-800 p-6 rounded-xl shadow-lg">
+          <h3 className="text-xl font-bold text-white mb-2 flex items-center gap-2">
+            <Map className="w-6 h-6 text-blue-400" />
+            Geo-Fencing (Zona Bahaya)
+          </h3>
+          <p className="text-gray-400 text-sm mb-6">
+            Tentukan poligon 4-titik (format relatif 0.0 - 1.0) untuk mendefinisikan area perlintasan kereta. YOLO AI hanya akan memicu peringatan jika kendaraan berada di dalam zona ini.
+          </p>
+
+          <form onSubmit={handleSavePolygon} className="space-y-4">
+            <div className="grid grid-cols-2 gap-4">
+              {polygon.map((pt, i) => (
+                <div key={i} className="bg-gray-800/50 p-3 rounded-lg border border-gray-700">
+                  <div className="text-xs text-gray-500 font-medium mb-2">Titik {i + 1}</div>
+                  <div className="flex gap-2">
+                    <div>
+                      <label className="text-xs text-gray-400 block mb-1">X (0-1)</label>
+                      <input 
+                        type="number" step="0.01" min="0" max="1" required
+                        value={pt.x} onChange={(e) => handlePointChange(i, 'x', e.target.value)}
+                        className="w-full bg-gray-900 border border-gray-700 rounded px-2 py-1 text-sm text-white focus:border-blue-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs text-gray-400 block mb-1">Y (0-1)</label>
+                      <input 
+                        type="number" step="0.01" min="0" max="1" required
+                        value={pt.y} onChange={(e) => handlePointChange(i, 'y', e.target.value)}
+                        className="w-full bg-gray-900 border border-gray-700 rounded px-2 py-1 text-sm text-white focus:border-blue-500"
+                      />
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+            
+            <button 
+              type="submit" disabled={isSavingPoly}
+              className="w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 rounded-lg transition flex items-center justify-center gap-2 disabled:opacity-50"
+            >
+              <Save className="w-4 h-4" />
+              {isSavingPoly ? 'Menyimpan...' : 'Terapkan Zona Bahaya'}
+            </button>
+          </form>
+        </div>
+      </div>
+
+      <div className="space-y-6">
 
         {/* Integrasi DJKA & IoT */}
         <div className="bg-gray-900 border border-gray-800 p-6 rounded-xl shadow-lg">
