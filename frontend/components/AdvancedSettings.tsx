@@ -1,14 +1,29 @@
 "use client";
 
 import { useState } from 'react';
-import { ShieldAlert, Send, Map, Save, ServerCrash } from 'lucide-react';
+import { ShieldAlert, Send, Map, Save, ServerCrash, MonitorPlay } from 'lucide-react';
 
 interface Point {
   x: number;
   y: number;
 }
 
-export default function AdvancedSettings({ backendUrl }: { backendUrl: string }) {
+interface AdvancedSettingsProps {
+  backendUrl: string;
+  isYoutubeEnabled: boolean;
+  setIsYoutubeEnabled: (val: boolean) => void;
+  isLocalVideoEnabled: boolean;
+  setIsLocalVideoEnabled: (val: boolean) => void;
+  isCctvEnabled: boolean;
+  setIsCctvEnabled: (val: boolean) => void;
+}
+
+export default function AdvancedSettings({ 
+  backendUrl,
+  isYoutubeEnabled, setIsYoutubeEnabled,
+  isLocalVideoEnabled, setIsLocalVideoEnabled,
+  isCctvEnabled, setIsCctvEnabled
+}: AdvancedSettingsProps) {
   const [telegramToken, setTelegramToken] = useState("");
   const [telegramChatId, setTelegramChatId] = useState("");
   const [isSavingTg, setIsSavingTg] = useState(false);
@@ -142,6 +157,58 @@ export default function AdvancedSettings({ backendUrl }: { backendUrl: string })
       </div>
 
       <div className="space-y-6">
+        {/* FEATURE UPDATE: Dynamic UI Toggles for Canned Demo */}
+        <div className="bg-gray-900 border border-gray-800 p-6 rounded-xl shadow-lg">
+          <h3 className="text-xl font-bold text-white mb-2 flex items-center gap-2">
+            <MonitorPlay className="w-6 h-6 text-blue-400" />
+            Kontrol Fitur Demo (Video Source)
+          </h3>
+          <p className="text-gray-400 text-sm mb-6">
+            Aktifkan atau sembunyikan sumber video tambahan di tab Live Monitoring untuk menyederhanakan tampilan saat presentasi.
+          </p>
+
+          <div className="space-y-4">
+            <div className="flex items-center justify-between bg-gray-800/50 p-3 rounded-lg border border-gray-700">
+              <div>
+                <div className="text-sm font-medium text-gray-200">YouTube Live</div>
+                <div className="text-xs text-gray-500">Tampilkan opsi input URL YouTube</div>
+              </div>
+              <button 
+                onClick={() => setIsYoutubeEnabled(!isYoutubeEnabled)}
+                className={`w-12 h-6 rounded-full transition-colors relative ${isYoutubeEnabled ? 'bg-blue-600' : 'bg-gray-600'}`}
+              >
+                <div className={`w-4 h-4 bg-white rounded-full absolute top-1 transition-transform ${isYoutubeEnabled ? 'translate-x-7' : 'translate-x-1'}`} />
+              </button>
+            </div>
+            
+            <div className="flex items-center justify-between bg-gray-800/50 p-3 rounded-lg border border-gray-700">
+              <div>
+                <div className="text-sm font-medium text-gray-200">RTSP CCTV</div>
+                <div className="text-xs text-gray-500">Tampilkan opsi stream CCTV</div>
+              </div>
+              <button 
+                onClick={() => setIsCctvEnabled(!isCctvEnabled)}
+                className={`w-12 h-6 rounded-full transition-colors relative ${isCctvEnabled ? 'bg-blue-600' : 'bg-gray-600'}`}
+              >
+                <div className={`w-4 h-4 bg-white rounded-full absolute top-1 transition-transform ${isCctvEnabled ? 'translate-x-7' : 'translate-x-1'}`} />
+              </button>
+            </div>
+
+            <div className="flex items-center justify-between bg-gray-800/50 p-3 rounded-lg border border-gray-700">
+              <div>
+                <div className="text-sm font-medium text-gray-200">Local Video</div>
+                <div className="text-xs text-gray-500">Tampilkan opsi unggah file video</div>
+              </div>
+              <button 
+                onClick={() => setIsLocalVideoEnabled(!isLocalVideoEnabled)}
+                className={`w-12 h-6 rounded-full transition-colors relative ${isLocalVideoEnabled ? 'bg-blue-600' : 'bg-gray-600'}`}
+              >
+                <div className={`w-4 h-4 bg-white rounded-full absolute top-1 transition-transform ${isLocalVideoEnabled ? 'translate-x-7' : 'translate-x-1'}`} />
+              </button>
+            </div>
+          </div>
+        </div>
+
         {/* Integrasi DJKA & IoT */}
         <div className="bg-gray-900 border border-gray-800 p-6 rounded-xl shadow-lg">
           <h3 className="text-xl font-bold text-white mb-2 flex items-center gap-2">

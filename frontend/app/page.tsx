@@ -22,6 +22,18 @@ export default function Home() {
   
   const [mainTab, setMainTab] = useState<'monitoring' | 'analytics' | 'settings'>('monitoring');
   const [sourceTab, setSourceTab] = useState<'demo' | 'youtube' | 'rtsp' | 'upload'>('demo');
+
+  // FEATURE UPDATE: Dynamic UI Toggles for Canned Demo
+  const [isYoutubeEnabled, setIsYoutubeEnabled] = useState(false);
+  const [isLocalVideoEnabled, setIsLocalVideoEnabled] = useState(false);
+  const [isCctvEnabled, setIsCctvEnabled] = useState(false);
+
+  useEffect(() => {
+    // Reset sourceTab ke 'demo' jika tab yang sedang aktif tiba-tiba di-disable
+    if (sourceTab === 'youtube' && !isYoutubeEnabled) setSourceTab('demo');
+    if (sourceTab === 'rtsp' && !isCctvEnabled) setSourceTab('demo');
+    if (sourceTab === 'upload' && !isLocalVideoEnabled) setSourceTab('demo');
+  }, [isYoutubeEnabled, isCctvEnabled, isLocalVideoEnabled, sourceTab]);
   
   const [youtubeUrl, setYoutubeUrl] = useState("https://www.youtube.com/watch?v=q7lvnYVuqNY");
   const [rtspUrl, setRtspUrl] = useState("");
@@ -187,7 +199,14 @@ export default function Home() {
         {mainTab === 'analytics' && <AnalyticsDashboard backendUrl={backendUrl} />}
 
         {/* Tab Content: Advanced Settings */}
-        {mainTab === 'settings' && <AdvancedSettings backendUrl={backendUrl} />}
+        {mainTab === 'settings' && (
+          <AdvancedSettings 
+            backendUrl={backendUrl} 
+            isYoutubeEnabled={isYoutubeEnabled} setIsYoutubeEnabled={setIsYoutubeEnabled}
+            isLocalVideoEnabled={isLocalVideoEnabled} setIsLocalVideoEnabled={setIsLocalVideoEnabled}
+            isCctvEnabled={isCctvEnabled} setIsCctvEnabled={setIsCctvEnabled}
+          />
+        )}
 
         {/* Tab Content: Live Monitoring */}
         {mainTab === 'monitoring' && (
@@ -195,20 +214,22 @@ export default function Home() {
             {/* Input Controls */}
             <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 shadow-xl">
               <div className="flex flex-wrap gap-4 border-b border-gray-700 pb-4 mb-4">
-                <button onClick={() => setSourceTab('demo')} className={`flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition ${sourceTab === 'demo' ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-900/50' : 'text-gray-400 hover:text-white bg-gray-800'}`}>
-                  <Play className="w-5 h-5 text-indigo-300" /> Mode Simulasi (Canned Demo)
-                </button>
-                {/* DEBUG LOCKDOWN: Matikan sementara YouTube & Local Video */}
-                <button disabled onClick={() => {}} className="flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition opacity-50 cursor-not-allowed text-gray-500">
-                  <Youtube className="w-5 h-5" /> YouTube Live <span className="text-[10px] text-red-400 ml-1">(Disabled for Testing)</span>
-                </button>
-                <button onClick={() => setSourceTab('rtsp')} className={`flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition ${sourceTab === 'rtsp' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white'}`}>
-                  <Radio className="w-5 h-5" /> RTSP CCTV
-                </button>
-                {/* DEBUG LOCKDOWN: Matikan sementara YouTube & Local Video */}
-                <button disabled onClick={() => {}} className="flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition opacity-50 cursor-not-allowed text-gray-500">
-                  <Upload className="w-5 h-5" /> Local Video <span className="text-[10px] text-red-400 ml-1">(Disabled for Testing)</span>
-                </button>
+                {/* FEATURE UPDATE: Dynamic UI Toggles for Canned Demo */}
+                {isYoutubeEnabled && (
+                  <button onClick={() => setSourceTab('youtube')} className={`flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition ${sourceTab === 'youtube' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white bg-gray-800'}`}>
+                    <Youtube className="w-5 h-5" /> YouTube Live
+                  </button>
+                )}
+                {isCctvEnabled && (
+                  <button onClick={() => setSourceTab('rtsp')} className={`flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition ${sourceTab === 'rtsp' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white bg-gray-800'}`}>
+                    <Radio className="w-5 h-5" /> RTSP CCTV
+                  </button>
+                )}
+                {isLocalVideoEnabled && (
+                  <button onClick={() => setSourceTab('upload')} className={`flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition ${sourceTab === 'upload' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white bg-gray-800'}`}>
+                    <Upload className="w-5 h-5" /> Local Video
+                  </button>
+                )}
               </div>
 
               {sourceTab === 'demo' && (
@@ -222,24 +243,23 @@ export default function Home() {
                 </div>
               )}
 
-              {sourceTab === 'youtube' && (
-                <form onSubmit={(e) => handleUpdateUrl(e, 'youtube')} className="flex gap-2">
+              {sourceTab === 'youtube' && isYoutubeEnabled && (
+                <form onSubmit={(e) => handleUpdateUrl(e, 'youtube')} className="flex gap-2 mb-4">
                   <input type="url" value={youtubeUrl} onChange={(e) => setYoutubeUrl(e.target.value)} className="flex-1 bg-gray-800 border border-gray-700 text-white rounded-md px-4 py-2 focus:outline-none focus:border-blue-500" placeholder="https://www.youtube.com/watch?v=..." required />
                   <button type="submit" disabled={isUpdating} className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-md font-medium transition disabled:opacity-50 min-w-[150px]">{isUpdating ? 'Loading...' : 'Stream YouTube'}</button>
                 </form>
               )}
 
-              {sourceTab === 'rtsp' && (
-                <form onSubmit={(e) => handleUpdateUrl(e, 'rtsp')} className="flex gap-2">
+              {sourceTab === 'rtsp' && isCctvEnabled && (
+                <form onSubmit={(e) => handleUpdateUrl(e, 'rtsp')} className="flex gap-2 mb-4">
                   <input type="text" value={rtspUrl} onChange={(e) => setRtspUrl(e.target.value)} className="flex-1 bg-gray-800 border border-gray-700 text-white rounded-md px-4 py-2 focus:outline-none focus:border-blue-500" placeholder="rtsp://username:pass@192.168.1.100:554/stream" required />
                   <button type="submit" disabled={isUpdating} className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-md font-medium transition disabled:opacity-50 min-w-[150px]">{isUpdating ? 'Loading...' : 'Connect CCTV'}</button>
                 </form>
               )}
 
-              {sourceTab === 'upload' && (
-                <div className="flex items-center gap-4">
-                  {/* DEBUG LOCKDOWN: Matikan sementara Local Video */}
-                  <input type="file" accept="video/mp4,video/x-m4v,video/*" onChange={handleFileUpload} disabled={true} className="block w-full text-sm text-gray-400 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-blue-600 file:text-white hover:file:bg-blue-700 opacity-50 cursor-not-allowed" />
+              {sourceTab === 'upload' && isLocalVideoEnabled && (
+                <div className="flex items-center gap-4 mb-4">
+                  <input type="file" accept="video/mp4,video/x-m4v,video/*" onChange={handleFileUpload} disabled={isUpdating} className="block w-full text-sm text-gray-400 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-blue-600 file:text-white hover:file:bg-blue-700 disabled:opacity-50" />
                   {isUpdating && uploadProgress > 0 && (
                     <div className="flex-1">
                       <div className="w-full bg-gray-700 rounded-full h-2.5">
